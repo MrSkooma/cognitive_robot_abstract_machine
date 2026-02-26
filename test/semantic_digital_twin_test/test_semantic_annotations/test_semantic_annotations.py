@@ -18,7 +18,7 @@ from semantic_digital_twin.world_description.world_entity import (
 )
 
 try:
-    from ripple_down_rules.user_interface.gui import RDRCaseViewer
+    from krrood.ripple_down_rules.user_interface.gui import RDRCaseViewer
     from PyQt6.QtWidgets import QApplication
 except ImportError as e:
     logging.debug(e)
