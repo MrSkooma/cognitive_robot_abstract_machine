@@ -25,14 +25,18 @@ class TestGLTFLoader:
     def test_invalid_file_path(self):
         """Test handling of non-existent file."""
         world = World()
-        loader = GLTFLoader(file_path="/nonexistent/path/file.gltf")
+        invalid_path = "/nonexistent/path/file.gltf"
+        loader = GLTFLoader(file_path=invalid_path)
 
-        with pytest.raises(ValueError, match="Failed to load file"):
-            world = loader.apply(world)
+        with pytest.raises(ValueError, match=invalid_path) as exc_info:
+            loader.apply(world)
+
+        # Verify exception chaining preserves original error
+        assert exc_info.value.__cause__ is not None
 
     def test_malformed_gltf(self):
         """Test handling of malformed GLTF data."""
-        with tempfile.NamedTemporaryFile(suffix=".gltf", delete=False, mode='w') as f:
+        with tempfile.NamedTemporaryFile(suffix=".gltf", delete=False, mode="w") as f:
             f.write("{ invalid json without closing brace")
             temp_path = f.name
 
@@ -40,10 +44,14 @@ class TestGLTFLoader:
             world = World()
             loader = GLTFLoader(file_path=temp_path)
 
-            with pytest.raises(ValueError, match="Failed to load file"):
-                world = loader.apply(world)
+            with pytest.raises(ValueError, match=temp_path) as exc_info:
+                loader.apply(world)
+
+            # Verify exception chaining preserves original error
+            assert exc_info.value.__cause__ is not None
         finally:
             os.unlink(temp_path)
+
     def test_empty_gltf_file(self):
         """Test handling of GLTF file with only a root node (no geometry)."""
         # Create minimal scene with empty root mesh
@@ -79,7 +87,7 @@ class TestGLTFLoader:
         scene.graph.update(
             frame_to="transform_node",
             frame_from="root",
-            transform=trimesh.transformations.translation_matrix([1, 0, 0])
+            transform=trimesh.transformations.translation_matrix([1, 0, 0]),
         )
 
         # Add leaf with geometry as child of transform node
@@ -89,7 +97,7 @@ class TestGLTFLoader:
             node_name="leaf",
             geom_name="leaf_geom",
             parent_node_name="transform_node",
-            transform=trimesh.transformations.translation_matrix([0, 1, 0])
+            transform=trimesh.transformations.translation_matrix([0, 1, 0]),
         )
 
         with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as f:
@@ -148,8 +156,12 @@ class TestGLTFLoader:
 
         scene = trimesh.Scene()
         scene.add_geometry(mesh1, node_name="box", geom_name="box_geom")
-        scene.add_geometry(mesh2, node_name="cylinder", geom_name="cyl_geom",
-                          transform=trimesh.transformations.translation_matrix([2, 0, 0]))
+        scene.add_geometry(
+            mesh2,
+            node_name="cylinder",
+            geom_name="cyl_geom",
+            transform=trimesh.transformations.translation_matrix([2, 0, 0]),
+        )
 
         loader = GLTFLoader(file_path="/dummy/path.gltf")
         loader.scene = scene
@@ -183,7 +195,7 @@ class TestGLTFLoader:
         loader = GLTFLoader(file_path="/dummy/path.gltf")
         loader.scene = scene
 
-        with pytest.raises(ValueError, match="More than one root"):
+        with pytest.raises(ValueError, match="Multiple root nodes found in scene"):
             loader._get_root_node()
 
     def test_build_world_single_body(self):
@@ -219,8 +231,9 @@ class TestGLTFLoader:
 
         scene = trimesh.Scene()
         scene.add_geometry(mesh1, node_name="parent", geom_name="geom1")
-        scene.add_geometry(mesh2, node_name="child", geom_name="geom2",
-                          parent_node_name="parent")
+        scene.add_geometry(
+            mesh2, node_name="child", geom_name="geom2", parent_node_name="parent"
+        )
         loader.scene = scene
 
         world = World()
@@ -247,10 +260,12 @@ class TestGLTFLoader:
         mesh = trimesh.creation.box(extents=[1.0, 1.0, 1.0])
 
         scene.add_geometry(mesh, node_name="Bolt_001", geom_name="geom1")
-        scene.add_geometry(mesh, node_name="Bolt_002", geom_name="geom2",
-                          parent_node_name="Bolt_001")
-        scene.add_geometry(mesh, node_name="Nut_001", geom_name="geom3",
-                          parent_node_name="Bolt_001")
+        scene.add_geometry(
+            mesh, node_name="Bolt_002", geom_name="geom2", parent_node_name="Bolt_001"
+        )
+        scene.add_geometry(
+            mesh, node_name="Nut_001", geom_name="geom3", parent_node_name="Bolt_001"
+        )
 
         loader = GLTFLoader(file_path="/dummy/path.gltf")
         loader.scene = scene
@@ -268,9 +283,16 @@ class TestGLTFLoader:
         parent_transform = trimesh.transformations.translation_matrix([1, 0, 0])
         child_transform = trimesh.transformations.translation_matrix([1, 2, 0])
 
-        scene.add_geometry(mesh, node_name="parent", geom_name="geom1", transform=parent_transform)
-        scene.add_geometry(mesh, node_name="child", geom_name="geom2",
-                          parent_node_name="parent", transform=child_transform)
+        scene.add_geometry(
+            mesh, node_name="parent", geom_name="geom1", transform=parent_transform
+        )
+        scene.add_geometry(
+            mesh,
+            node_name="child",
+            geom_name="geom2",
+            parent_node_name="parent",
+            transform=child_transform,
+        )
 
         loader = GLTFLoader(file_path="/dummy/path.gltf")
         loader.scene = scene
@@ -291,9 +313,13 @@ def test_readme_example():
 
     scene = trimesh.Scene()
     scene.add_geometry(box1, node_name="base", geom_name="base_geom")
-    scene.add_geometry(box2, node_name="top", geom_name="top_geom",
-                      parent_node_name="base",
-                      transform=trimesh.transformations.translation_matrix([0, 0, 1]))
+    scene.add_geometry(
+        box2,
+        node_name="top",
+        geom_name="top_geom",
+        parent_node_name="base",
+        transform=trimesh.transformations.translation_matrix([0, 0, 1]),
+    )
 
     with tempfile.NamedTemporaryFile(suffix=".glb", delete=False) as f:
         temp_path = f.name
@@ -309,7 +335,9 @@ def test_readme_example():
         assert world.root is not None
         assert len(list(world.kinematic_structure_entities)) >= 1
 
-        print(f"✓ Successfully loaded scene with {len(list(world.kinematic_structure_entities))} bodies")
+        print(
+            f"✓ Successfully loaded scene with {len(list(world.kinematic_structure_entities))} bodies"
+        )
 
     finally:
         os.unlink(temp_path)
