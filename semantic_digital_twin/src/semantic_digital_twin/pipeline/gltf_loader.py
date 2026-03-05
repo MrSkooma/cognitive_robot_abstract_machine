@@ -140,12 +140,18 @@ class GLTFLoader(Step):
 
     def _extract_base_name(self, node_name: str) -> str:
         """
-        Extract base name by removing FreeCAD like suffixes like _001, _002.
+        Extract the prefix before the first underscore.
+
+        This handles FreeCAD suffixes (e.g., _001, _002) and trimesh-generated
+        hex hash suffixes (e.g., _3a7ad2). For example:
+
+        - ``Bolt_001_abc123`` → ``Bolt``
+        - ``Scale060_1_00e71f`` → ``Scale060``
 
         :param node_name: The original node name with potential suffix.
-        :return: The base name with suffix removed.
+        :return: The base name (text before the first underscore).
         """
-        match = re.match(r"^(.+?)(?:_\d+|_[A-Za-z]\d*)?$", str(node_name))
+        match = re.match(r"^([^_]+)", str(node_name))
         return match.group(1) if match else str(node_name)
 
     def _collect_matching_children(
@@ -320,30 +326,46 @@ class GLTFLoader(Step):
             visual=ShapeCollection([]),
         )
 
-    def _process_geometry_node(
-        self, node: str, visited_nodes: Set[str]
-    ) -> Optional[NodeProcessingResult]:
+    def _process_node(
+        self, node: str, body_parent: str, visited_nodes: Set[str]
+    ) -> Tuple[Optional[NodeProcessingResult], Set[Tuple[str, str]]]:
         """
-        Process a geometry node and return the result.
+        Process any node (geometry or non-geometry) and return result.
 
-        Groups similar meshes, fuses them, and creates a Body object.
+        Groups similar meshes, fuses them, and creates a Body object if geometry exists.
+        Otherwise, passes children through to the body_parent.
 
         :param node: The node name to process.
+        :param body_parent: The parent body name for connections.
         :param visited_nodes: Set of already visited node names.
-        :return: A NodeProcessingResult if the node has valid geometry, None otherwise.
+        :return: Tuple of (NodeProcessingResult if body created, children to visit with parents).
         """
-        object_nodes, children = self._grouping_similar_meshes(node)
+        object_nodes, remaining_children = self._grouping_similar_meshes(node)
         mesh = self._fusion_meshes(object_nodes)
 
-        if len(mesh.vertices) == 0:
-            return None
+        children_raw = self.scene.graph.transforms.children.get(node, [])
+        non_matching = {
+            c for c in children_raw if c not in object_nodes and c not in visited_nodes
+        }
 
-        body = self._trimesh_to_body(mesh, node)
-        return NodeProcessingResult(
-            body=body,
-            visited_nodes=object_nodes,
-            children_to_visit=children.difference(visited_nodes),
-        )
+        if len(mesh.vertices) > 0:
+            base_name = self._extract_base_name(node)
+            body = self._trimesh_to_body(mesh, base_name)
+            result = NodeProcessingResult(
+                body=body,
+                visited_nodes=object_nodes,
+                children_to_visit=remaining_children.difference(visited_nodes),
+            )
+            children_to_visit = {(c, node) for c in result.children_to_visit} | {
+                (c, body_parent) for c in non_matching
+            }
+            return result, children_to_visit
+
+        # No geometry - pass children through to current body_parent
+        children_to_visit = {
+            (c, body_parent) for c in children_raw if c not in visited_nodes
+        }
+        return None, children_to_visit
 
     def _process_root_node(
         self, root: str
@@ -356,65 +378,54 @@ class GLTFLoader(Step):
         :param root: The root node name.
         :return: A tuple of (root body, visited nodes, children to visit with their body parents).
         """
-        _, root_geometry = self.scene.graph.get(root)
-        children_raw = self.scene.graph.transforms.children.get(root, [])
+        result, children_to_visit = self._process_node(root, root, set())
 
-        if root_geometry is None:
-            body = self._create_empty_body(root)
-            return body, {root}, {(child, root) for child in children_raw}
+        if result is not None and len(result.body.visual.shapes) > 0:
+            return result.body, result.visited_nodes, children_to_visit
 
-        result = self._process_geometry_node(root, set())
-        if result and len(result.body.visual.shapes) > 0:
-            return (
-                result.body,
-                result.visited_nodes,
-                {(c, root) for c in result.children_to_visit},
-            )
-
-        # Root has empty geometry
+        # Root has no geometry - create empty body
         body = self._create_empty_body(root)
-        object_nodes, children = self._grouping_similar_meshes(root)
-        return body, object_nodes, {(child, root) for child in children}
+        children_raw = self.scene.graph.transforms.children.get(root, [])
+        return body, {root}, {(child, root) for child in children_raw}
 
-    def _handle_non_geometry_node(
-        self, node: str, body_parent: str, visited_nodes: Set[str]
-    ) -> Set[Tuple[str, str]]:
+    def _add_body_to_world_elements(
+        self,
+        world_elements: Dict[str, Body],
+        base_name_to_node: Dict[str, str],
+        node: str,
+        body: Body,
+    ) -> None:
         """
-        Handle a non-geometry node by passing through to its children.
+        Add a body to world_elements, merging meshes if the base name already exists.
 
-        Non-geometry nodes (like transforms or sketches) are skipped but their
-        children are still queued for processing with the correct parent body.
+        If a body with the same base name already exists, fuses the new body's
+        meshes into the existing body.
 
-        :param node: The non-geometry node name.
-        :param body_parent: The name of the parent body to use for child connections.
-        :param visited_nodes: Set of already visited node names.
-        :return: Set of (child node, body parent) tuples to visit.
+        :param world_elements: Dictionary mapping node names to Body objects.
+        :param base_name_to_node: Dictionary mapping base names to their first node key.
+        :param node: The node name to use as the key.
+        :param body: The Body object to add.
         """
-        children_to_visit = set()
-        for child in self.scene.graph.transforms.children.get(node, []):
-            if child not in visited_nodes:
-                children_to_visit.add((child, body_parent))
-        return children_to_visit
+        base_name = str(body.name)
 
-    def _handle_empty_geometry_node(
-        self, node: str, body_parent: str, visited_nodes: Set[str]
-    ) -> Tuple[Set[str], Set[Tuple[str, str]]]:
-        """
-        Handle a node with empty geometry.
+        existing_node = base_name_to_node.get(base_name)
 
-        Groups similar meshes and returns updated visited nodes and children to visit.
-
-        :param node: The node name with empty geometry.
-        :param body_parent: The name of the parent body to use for child connections.
-        :param visited_nodes: Set of already visited node names.
-        :return: A tuple of (updated visited nodes, children to visit with their body parents).
-        """
-        object_nodes, children = self._grouping_similar_meshes(node)
-        new_visited = object_nodes | {node}
-        children_to_visit = {
-            (c, body_parent) for c in children.difference(visited_nodes)
-        }
-        return new_visited, children_to_visit
+        if existing_node is not None:
+            # Merge meshes from new body into existing body
+            existing_body = world_elements[existing_node]
+            merged_shapes = (
+                list(existing_body.visual.shapes) + list(body.visual.shapes)
+            )
+            merged_collision = (
+                list(existing_body.collision.shapes) + list(body.collision.shapes)
+            )
+            existing_body.visual = ShapeCollection(merged_shapes)
+            existing_body.collision = ShapeCollection(merged_collision)
+            # Map the new node to the existing body for connection tracking
+            world_elements[node] = existing_body
+        else:
+            base_name_to_node[base_name] = node
+            world_elements[node] = body
 
     def _create_world_objects(self, world: World) -> World:
         """
@@ -431,44 +442,37 @@ class GLTFLoader(Step):
         """
         root = self._get_root_node()
         world_elements: Dict[str, Body] = {}
+        base_name_to_node: Dict[str, str] = {}
         connection: Dict[str, List[str]] = {}
         visited_nodes: Set[str] = set()
 
         # Process root
         root_body, root_visited, to_visit_new_node = self._process_root_node(root)
         world_elements[root] = root_body
+        base_name_to_node[str(root_body.name)] = root
         visited_nodes = visited_nodes.union(root_visited)
 
         while to_visit_new_node:
             node, body_parent = to_visit_new_node.pop()
+
             if node in visited_nodes:
                 continue
 
-            _, geometry_name = self.scene.graph.get(node)
+            result, children_to_visit = self._process_node(node, body_parent, visited_nodes)
 
-            # Non-geometry node: pass through to children
-            if geometry_name is None:
-                to_visit_new_node.update(
-                    self._handle_non_geometry_node(node, body_parent, visited_nodes)
+            if result is not None:
+                # Node created a body
+                self._add_body_to_world_elements(
+                    world_elements, base_name_to_node, node, result.body
                 )
+                visited_nodes.update(result.visited_nodes | {node})
+                connection.setdefault(body_parent, []).append(node)
+                connection[node] = []
+                to_visit_new_node.update(children_to_visit)
+            else:
+                # No geometry - just pass through to children
                 visited_nodes.add(node)
-                continue
-
-            result = self._process_geometry_node(node, visited_nodes)
-            if result is None:
-                new_visited, children = self._handle_empty_geometry_node(
-                    node, body_parent, visited_nodes
-                )
-                visited_nodes.update(new_visited)
-                to_visit_new_node.update(children)
-                continue
-
-            # Register body and connection
-            world_elements[node] = result.body
-            visited_nodes.update(result.visited_nodes | {node})
-            connection.setdefault(body_parent, []).append(node)
-            connection[node] = []
-            to_visit_new_node.update((c, node) for c in result.children_to_visit)
+                to_visit_new_node.update(children_to_visit)
 
         return self._build_world_from_elements(world_elements, connection, world)
 
