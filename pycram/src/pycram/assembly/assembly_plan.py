@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Callable, Iterator, Dict, Any, Optional, Type, Union, TYPE_CHECKING
 
+from semantic_digital_twin.robots.abstract_robot import AbstractRobot
 from semantic_digital_twin.world_description.world_entity import Body
 
 from ..datastructures.enums import Arms, ApproachDirection, VerticalAlignment
@@ -82,6 +83,9 @@ class AssemblyPlan:
 
     _park_between_steps: bool = True
     """Whether to park arms between steps."""
+
+    _skip_navigation: bool = False
+    """Whether to skip navigation actions (for stationary robots)."""
 
     def __iter__(self) -> Iterator[AssemblyStep]:
         """Iterate over assembly steps in order."""
@@ -187,6 +191,18 @@ class AssemblyPlan:
         self._park_between_steps = enabled
         return self
 
+    def with_skip_navigation(self, skip: bool) -> AssemblyPlan:
+        """
+        Enable or disable skipping navigation actions.
+
+        Set to True for stationary robots (like Tracy) that don't move.
+
+        :param skip: Whether to skip navigation actions.
+        :return: Self for chaining.
+        """
+        self._skip_navigation = skip
+        return self
+
     def filter(self, predicate: Callable[[AssemblyStep], bool]) -> AssemblyPlan:
         """
         Filter assembly steps based on a predicate.
@@ -199,6 +215,7 @@ class AssemblyPlan:
         new_plan._default_arm = self._default_arm
         new_plan._default_grasp = self._default_grasp
         new_plan._park_between_steps = self._park_between_steps
+        new_plan._skip_navigation = self._skip_navigation
         new_plan.start_point = self.start_point
         return new_plan
 
@@ -216,6 +233,7 @@ class AssemblyPlan:
         new_plan._default_arm = self._default_arm
         new_plan._default_grasp = self._default_grasp
         new_plan._park_between_steps = self._park_between_steps
+        new_plan._skip_navigation = self._skip_navigation
         new_plan.start_point = self.start_point
         return new_plan
 
@@ -237,7 +255,7 @@ class AssemblyPlan:
             step: AssemblyStep,
             arm: Arms,
             grasp: GraspDescription,
-            robot_view: Body,
+            robot_view: AbstractRobot,
     ) -> List[ActionDescription]:
         """
         Creates the default sequence of actions for transporting an object (PickUp → Navigate → Place).
@@ -245,7 +263,7 @@ class AssemblyPlan:
         :param step: The assembly step to create actions for.
         :param arm: The arm to use for manipulation.
         :param grasp: The grasp description to use.
-        :param robot_view: The robot body for reachability calculations.
+        :param robot_view: The robot for reachability calculations.
         :return: List of action descriptions for the transport sequence.
         """
         actions = []
@@ -257,17 +275,19 @@ class AssemblyPlan:
         )
         actions.append(pickup)
 
-        navigate_location = CostmapLocation(
-            target=step.target_pose,
-            reachable_arm=arm,
-            reachable_for=robot_view,
-            grasp_descriptions=grasp,
-        )
-        navigate = NavigateActionDescription(
-            target_location=navigate_location,
-            keep_joint_states=True,
-        )
-        actions.append(navigate)
+        # Skip navigation for stationary robots
+        if not self._skip_navigation and robot_view is not None:
+            navigate_location = CostmapLocation(
+                target=step.target_pose,
+                reachable_arm=arm,
+                reachable_for=robot_view,
+                grasp_descriptions=grasp,
+            )
+            navigate = NavigateActionDescription(
+                target_location=navigate_location,
+                keep_joint_states=True,
+            )
+            actions.append(navigate)
 
         place = PlaceActionDescription(
             object_designator=step.body,
@@ -282,7 +302,7 @@ class AssemblyPlan:
         self,
         plan_type: Type[LanguagePlan],
         context: Context,
-        robot_view: Body = None,
+        robot_view: AbstractRobot = None,
     ) -> LanguagePlan:
         """
         Convert this AssemblyPlan into a PyCRAM plan.
@@ -292,7 +312,7 @@ class AssemblyPlan:
 
         :param plan_type: The plan type to create (e.g., SequentialPlan).
         :param context: The PyCRAM context for plan execution.
-        :param robot_view: The robot body for reachability calculations.
+        :param robot_view: The robot for reachability calculations.
         :return: A plan of the specified type containing all actions.
         """
         action_descriptions: List[Any] = []
