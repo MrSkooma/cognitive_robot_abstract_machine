@@ -60,7 +60,7 @@ class WorldToAssemblyPlan:
 
         order = 0
         for body in bodies_sorted:
-            if body == world.root:
+            if body == world.root and len(body.collision.shapes) < 0:
                 continue
 
             if not filter_fn(body):

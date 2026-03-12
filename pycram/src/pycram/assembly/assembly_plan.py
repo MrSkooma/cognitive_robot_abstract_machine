@@ -65,7 +65,7 @@ class AssemblyPlan:
     """
     A collection of AssemblySteps representing a complete assembly plan.
 
-    Provides iteration, filtering, fluent configuration, and execution methods.
+    Provides iteration, filtering, configuration, and execution methods.
     Supports customization of grasp, action type, and parameters per step or globally.
     """
 
@@ -75,16 +75,16 @@ class AssemblyPlan:
     start_point: Optional[PoseStamped] = None
     """Starting point for assembly. If None, defaults to first object's location."""
 
-    _default_arm: Arms = field(default=Arms.RIGHT)
+    default_arm: Arms = field(default=Arms.RIGHT)
     """Default arm to use for manipulation."""
 
-    _default_grasp: Optional[Union[GraspDescription, Callable[[Body], GraspDescription]]] = None
-    """Default grasp or resolver function."""
+    default_grasp: Optional[Union[GraspDescription, Callable[[Body], GraspDescription]]] = None
+    """Default grasp or resolver function. Can be a GraspDescription or callable(Body) -> GraspDescription."""
 
-    _park_between_steps: bool = True
+    park_between_steps: bool = True
     """Whether to park arms between steps."""
 
-    _skip_navigation: bool = False
+    skip_navigation: bool = False
     """Whether to skip navigation actions (for stationary robots)."""
 
     def __iter__(self) -> Iterator[AssemblyStep]:
@@ -159,50 +159,6 @@ class AssemblyPlan:
         self.start_point = pose
         return self
 
-    def with_default_arm(self, arm: Arms) -> AssemblyPlan:
-        """
-        Set the default arm for all steps.
-
-        :param arm: The arm to use.
-        :return: Self for chaining.
-        """
-        self._default_arm = arm
-        return self
-
-    def with_default_grasp(
-        self, grasp: Union[GraspDescription, Callable[[Body], GraspDescription]]
-    ) -> AssemblyPlan:
-        """
-        Set the default grasp or grasp resolver for all steps.
-
-        :param grasp: A GraspDescription or callable(Body) -> GraspDescription.
-        :return: Self for chaining.
-        """
-        self._default_grasp = grasp
-        return self
-
-    def with_park_between_steps(self, enabled: bool) -> AssemblyPlan:
-        """
-        Enable or disable parking arms between steps.
-
-        :param enabled: Whether to park arms between steps.
-        :return: Self for chaining.
-        """
-        self._park_between_steps = enabled
-        return self
-
-    def with_skip_navigation(self, skip: bool) -> AssemblyPlan:
-        """
-        Enable or disable skipping navigation actions.
-
-        Set to True for stationary robots (like Tracy) that don't move.
-
-        :param skip: Whether to skip navigation actions.
-        :return: Self for chaining.
-        """
-        self._skip_navigation = skip
-        return self
-
     def filter(self, predicate: Callable[[AssemblyStep], bool]) -> AssemblyPlan:
         """
         Filter assembly steps based on a predicate.
@@ -211,13 +167,14 @@ class AssemblyPlan:
         :return: A new AssemblyPlan containing only steps that match the predicate.
         """
         filtered_steps = [step for step in self.steps if predicate(step)]
-        new_plan = AssemblyPlan(steps=filtered_steps)
-        new_plan._default_arm = self._default_arm
-        new_plan._default_grasp = self._default_grasp
-        new_plan._park_between_steps = self._park_between_steps
-        new_plan._skip_navigation = self._skip_navigation
-        new_plan.start_point = self.start_point
-        return new_plan
+        return AssemblyPlan(
+            steps=filtered_steps,
+            start_point=self.start_point,
+            default_arm=self.default_arm,
+            default_grasp=self.default_grasp,
+            park_between_steps=self.park_between_steps,
+            skip_navigation=self.skip_navigation,
+        )
 
     def reorder(self, key: Callable[[AssemblyStep], int]) -> AssemblyPlan:
         """
@@ -229,13 +186,14 @@ class AssemblyPlan:
         sorted_steps = sorted(self.steps, key=key)
         for i, step in enumerate(sorted_steps):
             step.order = i
-        new_plan = AssemblyPlan(steps=sorted_steps)
-        new_plan._default_arm = self._default_arm
-        new_plan._default_grasp = self._default_grasp
-        new_plan._park_between_steps = self._park_between_steps
-        new_plan._skip_navigation = self._skip_navigation
-        new_plan.start_point = self.start_point
-        return new_plan
+        return AssemblyPlan(
+            steps=sorted_steps,
+            start_point=self.start_point,
+            default_arm=self.default_arm,
+            default_grasp=self.default_grasp,
+            park_between_steps=self.park_between_steps,
+            skip_navigation=self.skip_navigation,
+        )
 
     def _resolve_grasp(self, step: AssemblyStep) -> GraspDescription:
         """
@@ -244,10 +202,10 @@ class AssemblyPlan:
         if step.grasp_description is not None:
             return step.grasp_description
         
-        if self._default_grasp is not None:
-            if callable(self._default_grasp):
-                return self._default_grasp(step.body)
-            return self._default_grasp
+        if self.default_grasp is not None:
+            if callable(self.default_grasp):
+                return self.default_grasp(step.body)
+            return self.default_grasp
         return _default_grasp()
 
     def _default_transport_actions(
@@ -276,7 +234,7 @@ class AssemblyPlan:
         actions.append(pickup)
 
         # Skip navigation for stationary robots
-        if not self._skip_navigation and robot_view is not None:
+        if not self.skip_navigation and robot_view is not None:
             navigate_location = CostmapLocation(
                 target=step.target_pose,
                 reachable_arm=arm,
@@ -327,7 +285,7 @@ class AssemblyPlan:
 
         for step in self.steps:
             grasp = self._resolve_grasp(step)
-            arm = self._default_arm
+            arm = self.default_arm
 
             if step.action_type is not None:
                 action = step.action_type.description(
@@ -346,7 +304,7 @@ class AssemblyPlan:
                 )
                 action_descriptions.extend(transport_actions)
 
-            if self._park_between_steps:
+            if self.park_between_steps:
                 park = ParkArmsActionDescription(Arms.BOTH)
                 action_descriptions.append(park)
 

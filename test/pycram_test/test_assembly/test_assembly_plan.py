@@ -311,7 +311,7 @@ class TestAssemblyPlanToPlan:
         converter = WorldToAssemblyPlan()
         assembly_plan = converter.convert(test_world)
 
-        assembly_plan.with_park_between_steps(True)
+        assembly_plan.park_between_steps = True
         sequential_plan = assembly_plan.to_plan(SequentialPlan, context)
 
         # Get action nodes - check child nodes of root
@@ -319,16 +319,15 @@ class TestAssemblyPlanToPlan:
             node for node in sequential_plan.nodes if node != sequential_plan.root
         ]
 
-        # For 1 body with park_between_steps=True:
-        # PickUp, Navigate, Place, ParkArms = 4 actions
-        assert len(action_nodes) == 4
+        # For 1 body with park_between_steps=True (no robot_view, so no Navigate):
+        # PickUp, Place, ParkArms = 3 actions
+        assert len(action_nodes) == 3
 
         # Check action types in order
         action_types = [node.designator_type for node in action_nodes]
         assert action_types[0] == PickUpAction
-        assert action_types[1] == NavigateAction
-        assert action_types[2] == PlaceAction
-        assert action_types[3] == ParkArmsAction
+        assert action_types[1] == PlaceAction
+        assert action_types[2] == ParkArmsAction
 
     def test_generate_without_park_arms(self, simple_pr2_world_setup):
         """Test generating without ParkArms between steps."""
@@ -338,7 +337,7 @@ class TestAssemblyPlanToPlan:
         converter = WorldToAssemblyPlan()
         assembly_plan = converter.convert(test_world)
 
-        assembly_plan.with_park_between_steps(False)
+        assembly_plan.park_between_steps = False
         sequential_plan = assembly_plan.to_plan(SequentialPlan, context)
 
         # Get action nodes
@@ -346,8 +345,8 @@ class TestAssemblyPlanToPlan:
             node for node in sequential_plan.nodes if node != sequential_plan.root
         ]
 
-        # For 1 body without park: PickUp, Navigate, Place = 3 actions
-        assert len(action_nodes) == 3
+        # For 1 body without park (no robot_view, so no Navigate): PickUp, Place = 2 actions
+        assert len(action_nodes) == 2
 
         action_types = [node.designator_type for node in action_nodes]
         assert ParkArmsAction not in action_types
@@ -360,7 +359,7 @@ class TestAssemblyPlanToPlan:
         converter = WorldToAssemblyPlan()
         assembly_plan = converter.convert(test_world)
 
-        assembly_plan.with_default_arm(Arms.LEFT)
+        assembly_plan.default_arm = Arms.LEFT
         sequential_plan = assembly_plan.to_plan(SequentialPlan, context)
 
         # Check that actions use left arm
@@ -374,32 +373,31 @@ class TestAssemblyPlanToPlan:
         assert pickup_nodes[0].kwargs.get("arm") == Arms.LEFT
 
 
-class TestAssemblyPlanFluentAPI:
-    """Tests for the fluent API on AssemblyPlan."""
+class TestAssemblyPlanConfiguration:
+    """Tests for the configuration options on AssemblyPlan."""
 
-    def test_fluent_api_chaining(self, simple_pr2_world_setup):
-        """Test that fluent API methods can be chained."""
+    def test_configuration_chaining(self, simple_pr2_world_setup):
+        """Test that configuration can be set and used correctly."""
         world, robot_view, context = simple_pr2_world_setup
         test_world = create_test_world_with_bodies(2)
 
         converter = WorldToAssemblyPlan()
         assembly_plan = converter.convert(test_world)
 
-        # Chain multiple methods
-        result = assembly_plan \
-            .with_default_arm(Arms.RIGHT) \
-            .with_park_between_steps(True)
+        # Set configuration via direct assignment
+        assembly_plan.default_arm = Arms.RIGHT
+        assembly_plan.park_between_steps = True
 
-        sequential_plan = result.to_plan(SequentialPlan, context)
+        sequential_plan = assembly_plan.to_plan(SequentialPlan, context)
 
         assert sequential_plan is not None
 
         # Should have actions for 2 bodies
-        # 2 * (PickUp + Navigate + Place + ParkArms) = 8 actions
+        # 2 * (PickUp + Place + ParkArms) = 6 actions (no Navigate when robot_view=None)
         action_nodes = [
             node for node in sequential_plan.nodes if node != sequential_plan.root
         ]
-        assert len(action_nodes) == 8
+        assert len(action_nodes) == 6
 
     def test_filter_with_to_plan(self, simple_pr2_world_setup):
         """Test filter combined with to_plan."""
@@ -411,12 +409,12 @@ class TestAssemblyPlanFluentAPI:
 
         # Filter to only include first body
         filtered_plan = assembly_plan.filter(lambda s: "part_0" in s.body.name.name)
-        filtered_plan.with_park_between_steps(False)
+        filtered_plan.park_between_steps = False
         sequential_plan = filtered_plan.to_plan(SequentialPlan, context)
 
         # Should have actions for 1 body only
-        # 1 * (PickUp + Navigate + Place) = 3 actions
+        # 1 * (PickUp + Place) = 2 actions (no Navigate when robot_view=None, no ParkArms)
         action_nodes = [
             node for node in sequential_plan.nodes if node != sequential_plan.root
         ]
-        assert len(action_nodes) == 3
+        assert len(action_nodes) == 2
