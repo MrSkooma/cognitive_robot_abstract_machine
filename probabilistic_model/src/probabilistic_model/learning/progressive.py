@@ -4,7 +4,7 @@ from __future__ import annotations
 from collections import deque
 import copy
 from dataclasses import dataclass, field
-from typing import Any, Callable, Iterable, Iterator, Optional
+from typing import Any, Iterable, Iterator, Optional
 
 import jax
 import jax.numpy as jnp
@@ -34,9 +34,13 @@ class PCColumn:
     """A single task-specific copy of a probabilistic circuit template."""
 
     task_id: str
+    """Identifier of the task this column represents."""
     column_root: Unit
+    """Root unit of this column, already mounted onto the parent circuit."""
     variable_domain: Optional[tuple[Variable, ...]] = None
+    """Variables this column models; defaults to :attr:`column_root`'s variables."""
     task_context: dict[str, Any] = field(default_factory=dict)
+    """Arbitrary metadata describing the task, kept alongside the column."""
     node_ids: set[int] = field(default_factory=set, init=False)
     """Reference ids (:attr:`Unit.index`) of every unit owned by this column."""
     leaf_ids: set[int] = field(default_factory=set, init=False)
@@ -147,11 +151,17 @@ class ProgressivePC:
     """Parent-owned progressive circuit that manages task-specific columns."""
 
     ppc: RxPc = field(init=False)
+    """The mounted circuit holding :attr:`root_unit` and every task column."""
     root_unit: Unit = field(init=False)
+    """Shared sum unit mixing over every task column mounted onto :attr:`ppc`."""
     template_pc: RxPc
+    """Circuit copied to create each new column's initial structure and parameters."""
     variable_domain: Optional[tuple[Variable, ...]] = None
+    """Variables every column models; defaults to :attr:`template_pc`'s variables."""
     columns: list[PCColumn] = field(default_factory=list)
+    """Task columns mounted onto this progressive circuit, oldest first."""
     task_context: dict[str, Any] = field(default_factory=dict)
+    """Arbitrary metadata describing this progressive circuit as a whole."""
 
     def __post_init__(self):
         self.ppc = RxPc()
@@ -163,7 +173,6 @@ class ProgressivePC:
         else:
             self.variable_domain = tuple(self.variable_domain)
         self._validate_template_domain()
-        # Clear out Sum on Sums #TODO check if needed etc. wegen Cloumn to Column Swapping Detection
         self.template_pc.simplify()
 
     @classmethod
@@ -172,7 +181,7 @@ class ProgressivePC:
         template_pc: RxPc,
         variable_domain: Optional[Iterable[Variable]] = None,
         task_context: Optional[dict[str, Any]] = None,
-    ) -> "ProgressivePC":
+    ) -> ProgressivePC:
         return cls(
             template_pc=template_pc,
             variable_domain=(
@@ -205,7 +214,6 @@ class ProgressivePC:
                 )
             yield left_node, right_node
             # Filter out cross-column lateral edges (SumUnit -> SumUnit)
-            # TODO: Check wie ist mit LEAFS da die ja anders sein können oder Domain Postion gleich auch?
             left_children = [
                 child
                 for child in left_node.subcircuits
@@ -247,10 +255,7 @@ class ProgressivePC:
                 if isinstance(left_node, SumUnit) and isinstance(right_node, SumUnit):
                     self.ppc.add_edge(left_node, right_node, log_weight=0.0)
                     left_node.normalize()
-        # self.ppc.is_decomposable()
         return column
-
-    #
 
     # %% column-node-extraction
     def get_column_nodes(self, column: PCColumn) -> set[Unit]:
