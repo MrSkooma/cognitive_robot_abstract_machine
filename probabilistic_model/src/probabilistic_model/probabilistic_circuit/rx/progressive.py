@@ -2,6 +2,7 @@ from __future__ import annotations
 
 # %% imports
 import copy
+import math
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -59,6 +60,11 @@ class CircuitColumn:
     unit_indices: frozenset[int] = field(init=False)
     """
     Indices of every unit owned by this column.
+    """
+
+    sample_count: int = field(default=0, init=False)
+    """
+    Number of samples this column was learned from.
     """
 
     def __post_init__(self):
@@ -254,6 +260,24 @@ class ProgressiveProbabilisticCircuit:
         for aligned in aligned_sum_units:
             self.circuit.add_edge(aligned.left, aligned.right, log_weight=0.0)
             aligned.left.normalize()
+
+    def weight_root_by_sample_count(self) -> None:
+        """
+        Set the weight of every column below :attr:`root` to its share of all samples
+        the columns were learned from.
+
+        Nothing changes while no column was learned from any samples.
+        """
+        total_sample_count = sum(column.sample_count for column in self.columns)
+        if total_sample_count == 0:
+            return
+        for column in self.columns:
+            log_weight = (
+                math.log(column.sample_count / total_sample_count)
+                if column.sample_count > 0
+                else -math.inf
+            )
+            self.circuit.add_edge(self.root, column.root, log_weight=log_weight)
 
     def aligned_units(
         self, left: CircuitColumn, right: CircuitColumn

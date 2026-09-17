@@ -165,8 +165,9 @@ class ProgressiveExpectationMaximization:
     Expectation maximization for a single column of a progressive probabilistic circuit.
 
     The expectation step evaluates the complete circuit, so responsibilities also flow
-    through earlier columns. The maximization step only updates the root mixture and the
-    units of the learned column; units of every other column stay unchanged.
+    through earlier columns. The maximization step only updates the units of the learned
+    column; units of every other column stay unchanged. After learning, the root mixture
+    weights every column by its share of all samples the columns were learned from.
 
     .. warning::
 
@@ -215,13 +216,14 @@ class ProgressiveExpectationMaximization:
             expectation = self._expectation_step(data)
             history.append(expectation.average_log_likelihood)
             self._maximization_step(learnable_units, expectation, data)
+        column.sample_count += len(data)
+        self.progressive_circuit.weight_root_by_sample_count()
         return history
 
     def learnable_units(self, column: CircuitColumn) -> LearnableUnits:
         """
         :param column: The column to learn.
-        :return: The root mixture of the progressive circuit and the sum and leaf units
-            of the column.
+        :return: The sum and leaf units of the column.
         :raises UnsupportedLeafDistributionError: If the column contains a leaf that
             cannot be learned from weighted data.
         """
@@ -232,10 +234,7 @@ class ProgressiveExpectationMaximization:
                 leaf_unit.distribution, (GaussianDistribution, DiscreteDistribution)
             ):
                 raise UnsupportedLeafDistributionError(leaf_unit.distribution)
-        sum_units = frozenset(
-            [self.progressive_circuit.root]
-            + [unit for unit in units if isinstance(unit, SumUnit)]
-        )
+        sum_units = frozenset(unit for unit in units if isinstance(unit, SumUnit))
         return LearnableUnits(sum_units=sum_units, leaf_units=leaf_units)
 
     def _expectation_step(self, data: npt.NDArray) -> ExpectationStepResult:
