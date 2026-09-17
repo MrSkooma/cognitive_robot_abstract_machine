@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from typing_extensions import Any, Dict
+from typing_extensions import Any, Dict, TYPE_CHECKING
 
-from coraplex.plans.attachment_nodes import DetachNode
+from coraplex.plans.attachment_nodes import ReAttachNode
 from coraplex.plans.plan_node import PlanNode
 from krrood.entity_query_language.core.variable import Variable
 from krrood.entity_query_language.factories import (
@@ -15,18 +15,16 @@ from krrood.entity_query_language.factories import (
     ConditionType,
 )
 from coraplex.datastructures.dataclasses import Context
-from coraplex.datastructures.enums import (
-    Arms,
-    ApproachDirection,
-    VerticalAlignment,
-)
+from coraplex.datastructures.enums import Arms
 from coraplex.datastructures.grasp import GraspDescription
+from coraplex.exceptions import BodyIsNotHeld
 from coraplex.plans.factories import sequential
 from coraplex.querying.predicates import GripperIsFree
 from coraplex.robot_plans.actions.base import ActionDescription
 from coraplex.robot_plans.actions.core.pick_up import PickUpAction
 from coraplex.robot_plans.mixins import (
     HasGraspDetectionThreshold,
+    HasTcpGoalThresholds,
     PlaceTuningParameters,
 )
 from coraplex.robot_plans.motions.gripper import (
@@ -40,9 +38,17 @@ from semantic_digital_twin.reasoning.robot_predicates import is_body_gripped
 from semantic_digital_twin.spatial_types.spatial_types import Pose
 from semantic_digital_twin.world_description.world_entity import Body
 
+if TYPE_CHECKING:
+    from semantic_digital_twin.robots.robot_parts import EndEffector
+
 
 @dataclass
-class PlaceAction(ActionDescription, PlaceTuningParameters, HasGraspDetectionThreshold):
+class PlaceAction(
+    ActionDescription,
+    PlaceTuningParameters,
+    HasGraspDetectionThreshold,
+    HasTcpGoalThresholds,
+):
     """
     Places an Object at a position using an arm.
     """
@@ -75,32 +81,51 @@ class PlaceAction(ActionDescription, PlaceTuningParameters, HasGraspDetectionThr
         """
         return sequential(
             [
-                DetachNode(body=self.object_designator, new_parent=self.world.root),
+                ReAttachNode(body=self.object_designator, new_parent=self.world.root),
                 MoveToolCenterPointMotion(
                     retract_pose,
                     self.arm,
                     max_linear_velocity=self.retract_linear_velocity,
+                    position_threshold=self.position_threshold,
+                    orientation_threshold=self.orientation_threshold,
                 ),
             ],
         )
 
-    @property
-    def _action_plan(self) -> PlanNode:
-        end_effector = ViewManager.get_arm_view(self.arm, self.robot).end_effector
+    def _grasp_description(self, end_effector: EndEffector) -> GraspDescription:
+        """
+        Describe how the object to place is held.
+
+        Read from the world whenever the object is really in the gripper, which is the
+        ground truth and needs no earlier action to have recorded it. A plan is built
+        before it runs, though, so an action plan built ahead of the pick-up that fills
+        the gripper has nothing to measure yet; the grasp that pick-up intends is used
+        then.
+
+        :param end_effector: The end effector holding the object.
+        :return: The grasp the object is held in.
+        """
+        if (
+            self.object_designator
+            in end_effector.tool_frame.child_kinematic_structure_entities
+        ):
+            return GraspDescription.from_attachment(
+                end_effector, self.object_designator
+            )
+
         previous_pick = self.plan_node.get_previous_node_by_designator_type(
             PickUpAction
         )
-        previous_grasp_description = (
-            previous_pick.designator.grasp_description
-            if previous_pick
-            else GraspDescription(
-                ApproachDirection.FRONT, VerticalAlignment.NoAlignment, end_effector
-            )
-        )
-        transport_pose, placing_pose, retract_pose = (
-            previous_grasp_description.pose_sequence(
-                self.target_location, self.object_designator, reverse=True
-            )
+        if previous_pick is None:
+            raise BodyIsNotHeld(self.object_designator, end_effector)
+        return previous_pick.designator.grasp_description
+
+    @property
+    def _action_plan(self) -> PlanNode:
+        end_effector = ViewManager.get_arm_view(self.arm, self.robot).end_effector
+        grasp_description = self._grasp_description(end_effector)
+        transport_pose, placing_pose, retract_pose = grasp_description.pose_sequence(
+            self.target_location, self.object_designator, reverse=True
         )
 
         return sequential(
@@ -108,18 +133,23 @@ class PlaceAction(ActionDescription, PlaceTuningParameters, HasGraspDetectionThr
                 MoveToolCenterPointMotion(
                     transport_pose,
                     self.arm,
-                    allow_gripper_collision=False,
+                    allow_gripper_collision=True,
                     max_linear_velocity=self.transport_linear_velocity,
+                    position_threshold=self.position_threshold,
+                    orientation_threshold=self.orientation_threshold,
                 ),
                 MoveToolCenterPointMotion(
                     placing_pose,
                     self.arm,
-                    allow_gripper_collision=False,
+                    allow_gripper_collision=True,
                     max_linear_velocity=self.placing_linear_velocity,
+                    position_threshold=self.position_threshold,
+                    orientation_threshold=self.orientation_threshold,
                 ),
                 MoveGripperMotion(
                     GripperState.OPEN,
                     self.arm,
+                    allow_gripper_collision=True,
                     finger_velocity=self.release_opening_velocity,
                 ),
                 self._retract_plan(retract_pose),

@@ -16,7 +16,10 @@ from semantic_digital_twin.spatial_types import (
     Point3,
 )
 from semantic_digital_twin.world import World
-from semantic_digital_twin.world_description.geometry import Shape
+from semantic_digital_twin.world_description.geometry import (
+    Shape,
+    VolumetricBoundingBox,
+)
 from semantic_digital_twin.world_description.graph_of_convex_sets.base import (
     GraphOfConvexSets,
 )
@@ -186,7 +189,7 @@ class IrisSeedingSettings:
         :param lower: Lower corner of the region to seed.
         :param upper: Upper corner of the region to seed, in ``lower``'s reference
             frame.
-        :return: ``grid_resolution`` candidate seed points per axis.
+        :return:``grid_resolution`` candidate seed points per axis.
         """
         reference_frame = lower.reference_frame
         lower_array = lower.to_np()[:3]
@@ -204,7 +207,9 @@ class IrisSeedingSettings:
         ]
 
 
-def _validate_and_convert_domain(search_space: BoundingBoxCollection) -> HPolyhedron:
+def _validate_and_convert_domain(
+    search_space: BoundingBoxCollection[VolumetricBoundingBox, Point3],
+) -> HPolyhedron:
     """
     Convert a search space into the single, finite ``HPolyhedron`` domain IRIS grows
     regions within.
@@ -278,12 +283,14 @@ def _shape_to_convex_set(
 
 
 @dataclass
-class GraphOfConvexPolygons(GraphOfConvexSets):
+class GraphOfConvexPolygons(
+    GraphOfConvexSets[Point3, BoundingBoxCollection[VolumetricBoundingBox, Point3]]
+):
     """
     A graph of convex sets whose regions are grown by Drake's IRIS algorithm and solved
     with Drake's ``GcsTrajectoryOptimization`` (:cite:t:`marcucci2022shortest`).
 
-    Unlike :class:`~semantic_digital_twin.world_description.graph_of_convex_sets.boxes.GraphOfBoundingBoxes`,
+    Unlike :class:`~semantic_digital_twin.world_description.graph_of_convex_sets.boxes.VolumetricGraphOfBoundingBoxes`,
     which exhaustively partitions free space into many small axis-aligned boxes, IRIS
     covers free space with a handful of large, non-axis-aligned convex regions -- a
     sufficient cover for solving path queries, not a complete map of free space (some
@@ -341,7 +348,7 @@ class GraphOfConvexPolygons(GraphOfConvexSets):
     def from_world(
         cls,
         world: World,
-        search_space: BoundingBoxCollection,
+        search_space: BoundingBoxCollection[VolumetricBoundingBox, Point3],
         bloat_obstacles: float = 0.0,
         seeding_settings: Optional[IrisSeedingSettings] = None,
         extra_seed_points: Sequence[Point3] = (),
@@ -369,9 +376,7 @@ class GraphOfConvexPolygons(GraphOfConvexSets):
         semantic_annotation = SemanticEnvironmentAnnotation(
             root=world.root, _world=world
         )
-        obstacle_entities = cls._obstacle_entities(
-            result.search_space, semantic_annotation
-        )
+        obstacle_entities = semantic_annotation.obstacle_entities(result.search_space)
         result.obstacles = [
             _shape_to_convex_set(shape, world.root, bloat_obstacles, bloat_obstacles)
             for entity in obstacle_entities

@@ -1,7 +1,11 @@
 from copy import deepcopy
+from dataclasses import dataclass, field
 
 import numpy as np
 import pytest
+from rustworkx.rustworkx import NoEdgeBetweenNodes
+from typing_extensions import Iterable, Iterator, List, Tuple, Generator
+
 from coraplex.alternative_motion_mappings.hsrb_motion_mapping import HSRBMoveMotion
 from coraplex.alternative_motion_mappings.stretch_motion_mapping import (
     StretchMoveToolCenterPoint,
@@ -20,13 +24,22 @@ from coraplex.datastructures.enums import (
 )
 from coraplex.datastructures.grasp import GraspDescription
 from coraplex.datastructures.trajectory import PoseTrajectory
+from coraplex.exceptions import NoFloorBelowRobot
 from coraplex.execution_environment import simulated_robot
+from coraplex.locations.base import Location, PoseGeneratorBackend, PoseValidator
 from coraplex.plans.factories import sequential, execute_single
 from coraplex.robot_plans.actions.composite.facing import FaceAtAction
 from coraplex.robot_plans.actions.composite.transporting import TransportAction
 from coraplex.robot_plans.actions.core.container import OpenAction, CloseAction
 from coraplex.robot_plans.actions.core.misc import DetectAction, MoveToReach
-from coraplex.robot_plans.actions.core.navigation import NavigateAction, LookAtAction
+from coraplex.robot_plans.actions.core.navigation import (
+    PathPlanningNavigateAction,
+)
+from coraplex.robot_plans.actions.core.navigation import (
+    NavigateAction,
+    LookAtAction,
+    ElevatorNavigation,
+)
 from coraplex.robot_plans.actions.core.pick_up import (
     ReachAction,
     GraspingAction,
@@ -41,7 +54,7 @@ from coraplex.robot_plans.actions.core.robot_body import (
 )
 from coraplex.view_manager import ViewManager
 from giskardpy.utils.utils_for_tests import compare_axis_angle, compare_orientations
-from rustworkx.rustworkx import NoEdgeBetweenNodes
+from semantic_digital_twin.callbacks.callback import ModelChangeCallback
 from semantic_digital_twin.datastructures.definitions import (
     TorsoState,
     GripperState,
@@ -49,7 +62,6 @@ from semantic_digital_twin.datastructures.definitions import (
 )
 from semantic_digital_twin.robots.robot_part_mixins import HasMobileBase
 from semantic_digital_twin.robots.robot_parts import AbstractRobot, EndEffector
-from typing_extensions import Tuple, Generator
 
 try:
     from semantic_digital_twin.robots.garmi import Garmi
@@ -59,7 +71,16 @@ from semantic_digital_twin.robots.hsrb import HSRB
 from semantic_digital_twin.robots.pr2 import PR2
 from semantic_digital_twin.robots.stretch import Stretch
 from semantic_digital_twin.robots.tiago import Tiago
-from semantic_digital_twin.semantic_annotations.semantic_annotations import Milk
+from semantic_digital_twin.semantic_annotations.semantic_annotations import (
+    Elevator,
+    FirstFloor,
+    Floor,
+    Level,
+)
+from semantic_digital_twin.semantic_annotations.semantic_annotations import (
+    Milk,
+    Spoon,
+)
 from semantic_digital_twin.spatial_types import (
     HomogeneousTransformationMatrix,
     Point3,
@@ -78,6 +99,49 @@ ALTERNATIVE_MOTION_MAPPINGS = [
     StretchClose,
     TiagoMoveSim,
 ]
+
+
+# %% standing a robot next to something
+
+
+def heading_towards(
+    world_P_stand: Iterable[float], world_P_target: Iterable[float], world: World
+) -> Pose:
+    """
+    A pose at ``world_P_stand`` whose x-axis points at ``world_P_target``.
+
+    This is the form
+    :class:`~coraplex.robot_plans.actions.core.navigation.NavigateAction` and
+    :meth:`~semantic_digital_twin.robots.robot_parts.MobileBase.pose_facing` read a
+    heading in: they turn it into a base orientation using the base's own forward axis,
+    so a test says where the robot should look rather than how far each base has to turn
+    to look there.
+    """
+    world_V_heading = np.asarray(world_P_target)[:2] - np.asarray(world_P_stand)[:2]
+    return Pose.from_xyz_rpy(
+        *np.asarray(world_P_stand)[:3],
+        yaw=float(np.arctan2(world_V_heading[1], world_V_heading[0])),
+        reference_frame=world.root,
+    )
+
+
+def stand_facing(
+    robot: AbstractRobot,
+    world_P_stand: Iterable[float],
+    world_P_target: Iterable[float],
+    world: World,
+) -> HomogeneousTransformationMatrix:
+    """
+    The base pose from which ``robot`` works on ``world_P_target``, standing at
+    ``world_P_stand``.
+
+    A robot reaches along its base's forward axis rather than along the direction it
+    drives in, so where a test drops it decides whether the target is in front of the
+    arm or off to its side.
+    """
+    return robot.mobile_base.pose_facing(
+        heading_towards(world_P_stand, world_P_target, world)
+    ).to_homogeneous_matrix()
 
 
 @pytest.fixture(
@@ -104,8 +168,13 @@ def setup_multi_robot_apartment(
     _tiago_world_setup,
     _pr2_world_setup,
     _apartment_world_setup,
+    multi_story_building,
 ):
     apartment_copy = deepcopy(_apartment_world_setup)
+    apartment_copy.merge_world_at_pose(
+        deepcopy(multi_story_building),
+        HomogeneousTransformationMatrix.from_xyz_rpy(0, -5, 0),
+    )
 
     if request.param == "hsrb":
         hsr_copy = deepcopy(_hsr_world_setup)
@@ -228,7 +297,7 @@ def test_move_torso_multi(immutable_multiple_robot_apartment):
 
 def test_navigate_multi(immutable_multiple_robot_apartment, rclpy_node):
     world, view, context = immutable_multiple_robot_apartment
-    target_position = [2, -2, 0]
+    target_position = [5, 2, 0]
 
     plan = execute_single(
         NavigateAction(
@@ -240,12 +309,14 @@ def test_navigate_multi(immutable_multiple_robot_apartment, rclpy_node):
     with simulated_robot:
         plan.perform()
 
-    robot_base_pose = view.root.global_transform
-    robot_base_position = robot_base_pose.to_position().to_np()
-    robot_base_orientation = robot_base_pose.to_quaternion().to_np()
+    robot_base_position = view.root.global_transform.to_position().to_np()
+    # An identity heading points the robot's front along the world's x-axis, whatever
+    # the axes its own base happens to be modelled with.
+    world_R_base = view.mobile_base.root.global_transform.to_rotation_matrix()
+    world_V_forward = world_R_base @ view.mobile_base.forward_axis
 
     assert robot_base_position[:3] == pytest.approx(target_position, abs=0.01)
-    assert robot_base_orientation == pytest.approx([0, 0, 0, 1], abs=0.01)
+    assert world_V_forward.to_np()[:3].flatten() == pytest.approx([1, 0, 0], abs=0.01)
 
 
 def test_move_gripper_multi(immutable_multiple_robot_apartment):
@@ -306,12 +377,13 @@ def test_reach_action_multi(immutable_multiple_robot_apartment):
         VerticalAlignment.NoAlignment,
         left_arm.end_effector,
     )
-    milk_body = world.get_body_by_name("milk.stl")
+    milk = world.get_semantic_annotations_by_type(Milk)[0]
+    milk_body = milk.root
     milk_body.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
         1, -2, 0.8, reference_frame=world.root
     )
-    view.root.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
-        0.3, -2.4, 0, reference_frame=world.root
+    view.root.parent_connection.origin = stand_facing(
+        view, (0.3, -2.4, 0), milk_body.global_pose.to_position().to_np(), world
     )
     world.notify_state_change()
 
@@ -322,7 +394,7 @@ def test_reach_action_multi(immutable_multiple_robot_apartment):
                 target_pose=Pose(
                     Point3.from_iterable([1, -2, 0.8]), reference_frame=world.root
                 ),
-                object_designator=milk_body,
+                object_designator=milk,
                 arm=Arms.LEFT,
                 grasp_description=grasp_description,
             ),
@@ -420,8 +492,8 @@ def test_grasping(immutable_multiple_robot_apartment):
     milk_body.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
         1, -2, 0.8, reference_frame=world.root
     )
-    robot.root.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
-        0.3, -2.4, 0, reference_frame=world.root
+    robot.root.parent_connection.origin = stand_facing(
+        robot, (0.3, -2.4, 0), milk_body.global_pose.to_position().to_np(), world
     )
     world.notify_state_change()
 
@@ -456,8 +528,8 @@ def test_pick_up_multi(mutable_multiple_robot_apartment, rclpy_node):
     milk_body.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
         1, -2, 0.6, reference_frame=world.root
     )
-    view.root.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
-        0.3, -2.4, 0, reference_frame=world.root
+    view.root.parent_connection.origin = stand_facing(
+        view, (0.3, -2.4, 0), milk_body.global_pose.to_position().to_np(), world
     )
     world.notify_state_change()
 
@@ -465,7 +537,9 @@ def test_pick_up_multi(mutable_multiple_robot_apartment, rclpy_node):
         [
             ParkArmsAction(Arms.BOTH),
             PickUpAction(
-                world.get_body_by_name("milk.stl"), Arms.LEFT, grasp_description
+                world.get_semantic_annotations_by_type(Milk)[0],
+                Arms.LEFT,
+                grasp_description,
             ),
         ],
         context,
@@ -506,8 +580,8 @@ def test_place_multi(mutable_multiple_robot_apartment):
     milk_body.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
         1, -2, 0.6, reference_frame=world.root
     )
-    view.root.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
-        0.3, -2.4, 0, reference_frame=world.root
+    view.root.parent_connection.origin = stand_facing(
+        view, (0.3, -2.4, 0), milk_body.global_pose.to_position().to_np(), world
     )
     world.notify_state_change()
 
@@ -515,7 +589,9 @@ def test_place_multi(mutable_multiple_robot_apartment):
         [
             ParkArmsAction(Arms.BOTH),
             PickUpAction(
-                world.get_body_by_name("milk.stl"), Arms.LEFT, grasp_description
+                world.get_semantic_annotations_by_type(Milk)[0],
+                Arms.LEFT,
+                grasp_description,
             ),
             PlaceAction(
                 world.get_body_by_name("milk.stl"),
@@ -564,11 +640,13 @@ def test_detect(immutable_multiple_robot_apartment):
     with world.modify_world():
         world.add_semantic_annotation(Milk(root=milk_body))
 
+    # East of the multi-storey building the fixture merges in, so that the robot looks
+    # at the milk rather than at one of the building's room walls.
     robot.root.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
-        1.5, -2, 0
+        5, -2, 0
     )
     milk_body.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
-        2.5, -2, 1.2, reference_frame=world.root
+        6, -2, 1.2, reference_frame=world.root
     )
 
     description = DetectAction(
@@ -587,7 +665,7 @@ def test_detect(immutable_multiple_robot_apartment):
     assert milk_body in perceived.bodies
     np.testing.assert_allclose(
         milk_body.global_pose.to_position().to_np().flatten()[:3],
-        (2.5, -2, 1.2),
+        (6, -2, 1.2),
         atol=1e-9,
     )
 
@@ -623,20 +701,23 @@ def test_close(immutable_multiple_robot_apartment, rclpy_node):
     world.get_connection_by_name("cabinet10_drawer_middle_joint").position = 0.3
     world.notify_state_change()
 
-    navigate_position = [1.5, 1.85, 0] if isinstance(robot, Tiago) else [1.65, 2.0, 0]
+    handle = world.get_body_by_name("handle_cab10_m")
+    navigate_position = (
+        [1.5, 1.85, 0] if isinstance(robot, (Tiago, Stretch)) else [1.65, 2.0, 0]
+    )
 
     plan = sequential(
         [
             MoveTorsoAction(TorsoState.HIGH),
             ParkArmsAction(Arms.BOTH),
             NavigateAction(
-                Pose(
-                    Point3.from_iterable(navigate_position),
-                    Quaternion.from_iterable([0, 0, 0.4, 1]),
-                    reference_frame=world.root,
+                heading_towards(
+                    navigate_position,
+                    handle.global_pose.to_position().to_np(),
+                    world,
                 )
             ),
-            CloseAction(world.get_body_by_name("handle_cab10_m"), Arms.LEFT),
+            CloseAction(handle, Arms.LEFT),
         ],
         context,
     )
@@ -654,12 +735,18 @@ def test_facing(immutable_multiple_robot_apartment):
         milk_pose = world.get_body_by_name("milk.stl").global_pose
         plan = execute_single(FaceAtAction(milk_pose, True), context)
         plan.perform()
-        milk_in_robot_frame = world.transform(
+        milk_in_base_frame = world.transform(
             world.get_body_by_name("milk.stl").global_transform,
-            robot.root,
+            robot.mobile_base.root,
         )
-        assert float(milk_in_robot_frame.to_position().y) == pytest.approx(
-            0.0, abs=0.01
+        # Facing the milk means it lies along the base's forward axis, which is the
+        # x-axis only for a base modelled that way. The base turns about the vertical,
+        # so only the horizontal direction to the milk is under test.
+        base_P_milk = milk_in_base_frame.to_position().to_np()[:2].flatten()
+        base_V_milk = base_P_milk / np.linalg.norm(base_P_milk)
+
+        assert base_V_milk == pytest.approx(
+            robot.mobile_base.forward_axis.to_np()[:2].flatten(), abs=0.01
         )
 
 
@@ -667,7 +754,7 @@ def test_transport(mutable_multiple_robot_apartment, rclpy_node):
     world, robot, context = mutable_multiple_robot_apartment
 
     description = TransportAction(
-        object_designator=world.get_body_by_name("milk.stl"),
+        object_designator=world.get_semantic_annotations_by_type(Milk)[0],
         target_location=Pose(
             Point3.from_iterable([3.1, 2.2, 0.95]),
             Quaternion.from_iterable([0.0, 0.0, 1.0, 0.0]),
@@ -717,7 +804,7 @@ def test_transport_open_container(mutable_multiple_robot_apartment, rclpy_node):
     if isinstance(robot, HSRB):
         return
     description = TransportAction(
-        object_designator=world.get_body_by_name("spoon.stl"),
+        object_designator=world.get_semantic_annotations_by_type(Spoon)[0],
         target_location=Pose.from_xyz_rpy(
             5.1, 3.3, 0.75, yaw=1.57, reference_frame=world.root
         ),
@@ -739,3 +826,285 @@ def test_transport_open_container(mutable_multiple_robot_apartment, rclpy_node):
     assert dist <= 0.02
 
     plan.plan.validate()
+
+
+# %% a location candidate is a heading, not a base pose
+
+
+@dataclass
+class SinglePoseGenerator(PoseGeneratorBackend):
+    """
+    Offers one fixed candidate, so a test can say exactly what is validated.
+    """
+
+    pose: Pose
+
+    def __iter__(self) -> Iterator[Pose]:
+        yield self.pose
+
+
+@dataclass
+class BasePoseRecorder(PoseValidator):
+    """
+    Accepts every candidate and records where the robot stood while it was checked.
+    """
+
+    base_poses: List[HomogeneousTransformationMatrix] = field(default_factory=list)
+
+    def __call__(self, *args, **kwargs) -> bool:
+        self.base_poses.append(self.robot.root.global_transform)
+        return True
+
+
+def test_a_location_validates_a_candidate_where_navigating_to_it_would_stand(
+    mutable_multiple_robot_apartment,
+):
+    """
+    A candidate is a heading, the same form
+    :class:`~coraplex.robot_plans.actions.core.navigation.NavigateAction` takes, so a
+    validator has to see the base pose that heading turns into.
+
+    A base that does not face along its x-axis is otherwise judged from an orientation
+    it never stands in.
+    """
+    world, robot, context = mutable_multiple_robot_apartment
+    # Clear of the multi-storey building's floor slab, which every robot would otherwise
+    # stand on: a candidate in collision is dropped before any validator sees it.
+    heading = Pose.from_xyz_rpy(5, -2.4, 0, yaw=0.7, reference_frame=world.root)
+    recorder = BasePoseRecorder()
+    location = Location(context, heading, SinglePoseGenerator(heading), [recorder])
+
+    assert list(location) == [heading]
+    np.testing.assert_allclose(
+        recorder.base_poses[0].to_np(),
+        robot.mobile_base.pose_facing(heading).to_homogeneous_matrix().to_np(),
+        atol=1e-9,
+    )
+
+
+def test_a_location_accepts_a_candidate_standing_on_the_floor(
+    mutable_multiple_robot_apartment,
+):
+    """
+    The floor is what the robot drives on, so resting on it is not the collision that
+    disqualifies a place to stand.
+    """
+    world, robot, context = mutable_multiple_robot_apartment
+    # An open stretch of the apartment, so the floor is the only thing any of these
+    # robots touches while standing there.
+    heading = Pose.from_xyz_rpy(11, 2.5, 0, yaw=0.7, reference_frame=world.root)
+    location = Location(context, heading, SinglePoseGenerator(heading), [])
+
+    assert list(location) == [heading]
+
+
+def test_multi_robot_gcs_navigation(immutable_multiple_robot_apartment, rclpy_node):
+    """
+    The robot ends up at the target, having driven around the furniture between it and
+    where it started rather than through it.
+    """
+    world, robot, context = immutable_multiple_robot_apartment
+    target_position = [5, 1]
+
+    plan = execute_single(
+        PathPlanningNavigateAction(
+            Pose.from_xyz_rpy(*target_position, 0, reference_frame=world.root)
+        ),
+        context=context,
+    )
+
+    with simulated_robot:
+        plan.perform()
+
+    robot_base_position = robot.global_transform.to_position().to_np().flatten()
+
+    assert robot_base_position[:2] == pytest.approx(target_position, abs=0.01)
+
+
+def test_gcs_navigation_arrives_at_each_waypoint_facing_the_next_one(
+    immutable_multiple_robot_apartment,
+):
+    """
+    Lining a waypoint's orientation up with the leg leaving it saves the next leg the
+    turn it would otherwise start with, which is what a differential drive pays for.
+    """
+    world, robot, context = immutable_multiple_robot_apartment
+
+    action = PathPlanningNavigateAction(Pose.from_xyz_rpy(5, 1, 0, reference_frame=world.root))
+    execute_single(action, context=context)
+
+    waypoints = action._waypoints()
+    path = action._path()
+
+    # The path starts at the first waypoint the robot has to travel to, not at the
+    # waypoint it is already standing on.
+    assert len(path) == len(waypoints) - 1
+
+    for pose, waypoint, next_waypoint in zip(path, waypoints[1:], waypoints[2:]):
+        world_V_travel = np.array(
+            [float(next_waypoint.x - waypoint.x), float(next_waypoint.y - waypoint.y)]
+        )
+        world_V_facing = pose.to_rotation_matrix().to_np()[:2, 0]
+
+        assert world_V_facing == pytest.approx(
+            world_V_travel / np.linalg.norm(world_V_travel), abs=0.01
+        )
+
+
+def test_gcs_navigation_plans_on_the_floor_the_robot_stands_on(
+    immutable_multiple_robot_apartment,
+):
+    """
+    The free space the robot drives through is the one above the floor it stands on, so
+    the multi-storey building standing next to the apartment contributes obstacles but
+    not the surface the path is laid out on.
+    """
+    world, robot, context = immutable_multiple_robot_apartment
+
+    action = PathPlanningNavigateAction(Pose.from_xyz_rpy(5, 1, 0, reference_frame=world.root))
+    execute_single(action, context=context)
+
+    floor = action._floor
+    assert floor in world.get_semantic_annotations_by_type(Floor)
+
+    base_pose = robot.root.global_pose
+    floor_box = floor.as_bounding_box_collection_at_origin(
+        HomogeneousTransformationMatrix(reference_frame=world.root)
+    ).bounding_box()
+    assert floor_box.min_x <= float(base_pose.x) <= floor_box.max_x
+    assert floor_box.min_y <= float(base_pose.y) <= floor_box.max_y
+    assert floor_box.max_z == pytest.approx(float(base_pose.z))
+
+    waypoints = action._waypoints()
+    assert [waypoint.reference_frame for waypoint in waypoints] == [floor.root] * len(
+        waypoints
+    )
+
+
+def test_gcs_navigation_takes_a_waypoints_height_from_that_waypoints_frame(
+    immutable_multiple_robot_apartment,
+):
+    """
+    A waypoint is expressed in the floor's frame, so the height the robot keeps while
+    driving to it has to be read in that same frame rather than in the world's.
+    """
+    world, robot, context = immutable_multiple_robot_apartment
+
+    action = PathPlanningNavigateAction(Pose.from_xyz_rpy(5, 1, 0, reference_frame=world.root))
+    execute_single(action, context=context)
+
+    # The last pose is the requested target, which carries the caller's own height.
+    for pose in action._path()[:-1]:
+        base_in_pose_frame = world.transform(
+            robot.root.global_transform, pose.reference_frame
+        )
+        assert float(pose.z) == pytest.approx(float(base_in_pose_frame.z))
+
+
+def test_gcs_navigation_needs_a_floor_below_the_robot(
+    mutable_multiple_robot_apartment,
+):
+    """
+    Without a floor there is no surface to lay a path out on, which is a broken world
+    rather than an unreachable target.
+    """
+    world, robot, context = mutable_multiple_robot_apartment
+    robot.root.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
+        -50, -50, 0
+    )
+    world.notify_state_change()
+
+    action = PathPlanningNavigateAction(Pose.from_xyz_rpy(5, 1, 0, reference_frame=world.root))
+    execute_single(action, context=context)
+
+    with pytest.raises(NoFloorBelowRobot) as raised:
+        action._waypoints()
+
+    assert raised.value.robot is robot
+
+
+# %% riding an elevator
+
+
+@dataclass(eq=False)
+class ElevatorOperator(ModelChangeCallback):
+    """
+    Drives an elevator to a floor as soon as a robot boards it, standing in for whatever
+    operates the elevator in the real world.
+
+    Reacting to the model change that boards the robot rather than polling for it matters
+    here: the plan runs on simulated time that advances as fast as the machine allows, so
+    every control cycle spent waiting is taken from the same budget the motions afterwards
+    need.
+    """
+
+    elevator: Elevator = field(kw_only=True)
+    """
+    The elevator this operator drives.
+    """
+
+    floor: Level = field(kw_only=True)
+    """
+    The floor the elevator is sent to once the robot is aboard.
+    """
+
+    robot: AbstractRobot = field(kw_only=True)
+    """
+    The robot whose boarding sets the elevator off.
+    """
+
+    robot_boarded: bool = field(default=False, init=False)
+    """
+    Whether the robot was ever observed aboard the elevator.
+    """
+
+    def on_model_change(self, **kwargs):
+        if self.robot.root.parent_kinematic_structure_entity is not self.elevator.root:
+            return
+        self.robot_boarded = True
+        self.elevator.close()
+        self.elevator.drive_to_floor(self.floor)
+        self.elevator.open()
+
+
+def test_elevator_navigation(mutable_multiple_robot_apartment, rclpy_node):
+    world, robot, context = mutable_multiple_robot_apartment
+
+    elevator = world.get_semantic_annotations_by_type(Elevator)[0]
+    elevator.open()
+
+    first_floor = world.get_semantic_annotations_by_type(FirstFloor)[0]
+    starting_height = float(robot.root.global_pose.to_position().z)
+    elevator_travel = float(elevator.drive_position_for_floor(first_floor)) - float(
+        elevator.mechanical_joint.position
+    )
+
+    operator = ElevatorOperator(
+        _world=world, elevator=elevator, floor=first_floor, robot=robot
+    )
+    action = ElevatorNavigation(elevator, first_floor)
+    plan = execute_single(action, context=context)
+
+    robot.root.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
+        1, -5, 0, reference_frame=world.root
+    )
+
+    with simulated_robot:
+        plan.perform()
+
+    cabin_position = elevator.root.global_transform.to_position().to_np().flatten()
+
+    # The robot ends up in front of the elevator's opening, a floor higher.
+    distance_from_cabin_center = float(elevator.scale.x) / 2 + action.exit_clearance
+    expected_position = (
+        cabin_position[:3]
+        + elevator.hole_direction.to_np().flatten()[:3]
+        * -1
+        * distance_from_cabin_center
+    )
+    expected_position[2] = starting_height + elevator_travel
+
+    assert operator.robot_boarded
+    assert robot.root.global_transform.to_position().to_np().flatten()[
+        :3
+    ] == pytest.approx(expected_position, abs=0.01)
