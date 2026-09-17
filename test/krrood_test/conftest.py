@@ -18,6 +18,7 @@ from krrood.entity_query_language.testing.result_generation import (
     regenerate_verbalization_results,
 )
 from krrood.ormatic.data_access_objects.alternative_mappings import *  # type: ignore
+from krrood.ormatic.helper import OrmaticInterfaceInformation
 from krrood.ormatic.ormatic import ORMatic
 from krrood.ormatic.type_dict import TypeDict
 from krrood.ormatic.utils import classes_of_module, create_engine
@@ -29,6 +30,8 @@ from .dataset import (
     example_classes,
     semantic_world_like_classes,
     alternative_mappings_construction_order,
+    clashing_field_names,
+    classes_with_generic,
 )
 from .dataset.example_classes import (
     KRROODPhysicalObject,
@@ -36,11 +39,14 @@ from .dataset.example_classes import (
     ChildNotMapped,
     ConceptType,
     JSONSerializableClass,
+    GenericJSONSerializableClass,
+    TextJSONSerializableClass,
 )
 from .dataset.role_and_ontology import (
     university_ontology_like_classes_without_descriptors,
     role_takers_in_another_module,
     classes_for_testing_role_recursion_error,
+    roles_over_a_value_stored_as_json,
 )
 from .dataset.semantic_world_like_classes import *
 from .test_eql.conf.world.doors_and_drawers import DoorsAndDrawersWorld
@@ -75,12 +81,16 @@ def generate_sqlalchemy_interface():
     )
     all_classes |= set(classes_of_module(role_takers_in_another_module))
     all_classes |= set(classes_of_module(classes_for_testing_role_recursion_error))
+    all_classes |= set(classes_of_module(roles_over_a_value_stored_as_json))
     all_classes |= set(classes_of_module(alternative_mappings_construction_order))
+    all_classes |= set(classes_of_module(clashing_field_names))
+    all_classes |= set(classes_of_module(classes_with_generic))
     all_classes |= {Symbol, Role}
 
     # remove classes that don't need persistence
     all_classes -= {HasType, HasTypes, ContainsType}
     all_classes -= {NotMappedParent, ChildNotMapped, JSONSerializableClass}
+    all_classes -= {GenericJSONSerializableClass, TextJSONSerializableClass}
 
     # only keep dataclasses
     all_classes = {
@@ -99,8 +109,10 @@ def generate_sqlalchemy_interface():
 
     instance = ORMatic(
         class_dependency_graph=class_diagram,
-        type_mappings=TypeDict({KRROODPhysicalObject: ConceptType}),
-        alternative_mappings=recursive_subclasses(AlternativeMapping),
+        interface_information=OrmaticInterfaceInformation(
+            type_mappings=TypeDict({KRROODPhysicalObject: ConceptType}),
+            alternative_mappings=recursive_subclasses(AlternativeMapping),
+        ),
     )
 
     instance.make_all_tables()

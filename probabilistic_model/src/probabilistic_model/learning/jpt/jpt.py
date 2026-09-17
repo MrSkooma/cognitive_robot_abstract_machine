@@ -8,12 +8,16 @@ import pandas as pd
 from jpt.learning.impurity import Impurity
 
 from krrood.adapters.json_serializer import SubclassJSONSerializer, from_json, to_json
-from random_events.interval import closed
+from random_events.interval import closed, Bound, SimpleInterval
 from random_events.product_algebra import VariableMap
 from random_events.variable import Variable, Continuous, Integer, Symbolic
 from typing_extensions import Self
 
-from probabilistic_model.learning.jpt.variables import AnnotatedVariable
+from probabilistic_model.learning.jpt.variables import (
+    AnnotatedVariable,
+    infer_variables_from_dataframe,
+)
+from probabilistic_model.learning.learning_method import LearningMethod
 from probabilistic_model.learning.nyga_induction import NygaInduction
 from probabilistic_model.distributions.distributions import (
     DiracDeltaDistribution,
@@ -32,15 +36,19 @@ from probabilistic_model.utils import MissingDict
 
 
 @dataclass
-class JointProbabilityTree(SubclassJSONSerializer):
+class JointProbabilityTree(LearningMethod, SubclassJSONSerializer):
     """
     Class that implements the JPT learning algorithm for probabilistic circuits.
     """
 
-    annotated_variables: Iterable[AnnotatedVariable]
+    annotated_variables: tuple[AnnotatedVariable, ...] = field(default_factory=tuple)
     """
-    The variables from initialization. Since variables will be overwritten as soon as the model is learned,
-    we need to store the variables from initialization here.
+    The variables from initialization, sorted.
+
+    Since variables will be overwritten as soon as the model is learned, we need to
+    store the variables from initialization here.
+
+    Left empty when the variables are only known at :meth:`fit` time.
     """
 
     targets: Optional[Iterable[Variable]] = field(default=None)
@@ -243,13 +251,30 @@ class JointProbabilityTree(SubclassJSONSerializer):
 
         return result
 
-    def fit(self, data: pd.DataFrame) -> ProbabilisticCircuit:
+    def fit(
+        self,
+        data: pd.DataFrame,
+        variables: Optional[Iterable[AnnotatedVariable]] = None,
+    ) -> ProbabilisticCircuit:
         """
-        Fit the model to the data.
+        Fit the model to the data, into a circuit of its own.
 
         :param data: The data to fit the model to.
+        :param variables: The annotated variables to fit over, replacing the ones given
+            at initialization, with all of them as targets and features. ``None`` keeps
+            the initialized ones, or infers them from the data if none were given at
+            initialization either.
         :return: The fitted model.
         """
+        if variables is None and not self.annotated_variables:
+            variables = infer_variables_from_dataframe(data)
+        if variables is not None:
+            self.annotated_variables = tuple(sorted(variables))
+            self.set_targets_and_features(None, None)
+            self.dependencies = VariableMap(
+                {var: list(self.targets) for var in self.features}
+            )
+        self.probabilistic_circuit = ProbabilisticCircuit()
         self.root = SumUnit(probabilistic_circuit=self.probabilistic_circuit)
         preprocessed_data = self.preprocess_data(data)
 
@@ -289,7 +314,10 @@ class JointProbabilityTree(SubclassJSONSerializer):
         if max_gain <= self.min_impurity_improvement:
 
             # create decomposable product node
-            leaf_node = self.create_leaf_node(data[self.indices[start:end]])
+            other_rows = np.concatenate([self.indices[:start], self.indices[end:]])
+            leaf_node = self.create_leaf_node(
+                data[self.indices[start:end]], data[other_rows]
+            )
             weight = number_of_samples / len(data)
             self.root.add_subcircuit(leaf_node, np.log(weight))
 
@@ -309,11 +337,55 @@ class JointProbabilityTree(SubclassJSONSerializer):
         self.c45queue.append((data, start, start + split_pos + 1, new_depth))
         self.c45queue.append((data, start + split_pos + 1, end, new_depth))
 
-    def create_leaf_node(self, data: np.ndarray) -> ProductUnit:
+    @staticmethod
+    def leaf_support(
+        own_values: np.ndarray, other_values: np.ndarray, tolerance_at_extremes: float
+    ) -> SimpleInterval:
+        """
+        The largest span around the range of `own_values` that stays clear of
+        `other_values`, widened by at most `tolerance_at_extremes` on each side.
+
+        Passed as the `support` of the :class:`NygaInduction` fit for a leaf, so that
+        widening that leaf's support for a variable to account for float
+        instabilities cannot cross into a sibling leaf's raw data for the same
+        variable - which would break the determinism of the tree the leaves are
+        mounted into. Considering only the nearest point on each side, rather than
+        every point in `other_values`, is sufficient because the widening cannot
+        reach further than `tolerance_at_extremes` in the first place.
+
+        :param own_values: The values of one continuous variable, for the rows of the
+            leaf under construction.
+        :param other_values: The values of that variable, for every row outside that
+            leaf.
+        :param tolerance_at_extremes: The widening to apply where `other_values`
+            leaves enough room for it.
+        :return: The allowed support.
+        """
+        own_lower, own_upper = own_values.min(), own_values.max()
+
+        lower, left = own_lower - tolerance_at_extremes, Bound.CLOSED
+        below = other_values[other_values < own_lower]
+        if len(below) > 0 and below.max() > lower:
+            lower, left = float(below.max()), Bound.OPEN
+
+        upper, right = own_upper + tolerance_at_extremes, Bound.CLOSED
+        above = other_values[other_values > own_upper]
+        if len(above) > 0 and above.min() < upper:
+            upper, right = float(above.min()), Bound.OPEN
+
+        return SimpleInterval.from_data(lower, upper, left, right)
+
+    def create_leaf_node(
+        self, data: np.ndarray, other_data: Optional[np.ndarray] = None
+    ) -> ProductUnit:
         """
         Create a fully decomposable product node from a 2D data array.
 
-        :param data: The preprocessed data to use for training
+        :param data: The preprocessed data to use for training.
+        :param other_data: The preprocessed data of every row that does not belong to
+            this leaf, used to keep continuous variables' fitted supports from
+            overlapping a sibling leaf's data. If not given, no such reservation is
+            made.
         :return: The leaf node.
         """
         result = ProductUnit(probabilistic_circuit=self.probabilistic_circuit)
@@ -326,6 +398,12 @@ class JointProbabilityTree(SubclassJSONSerializer):
                     min_likelihood_improvement=annotated_variable.min_likelihood_improvement,
                     min_samples_per_quantile=annotated_variable.min_samples_per_quantile,
                 )
+                if other_data is not None:
+                    distribution.support = self.leaf_support(
+                        data[:, index],
+                        other_data[:, index],
+                        distribution.tolerance_at_extremes,
+                    )
                 distribution = distribution.fit(data[:, index])
 
                 if isinstance(

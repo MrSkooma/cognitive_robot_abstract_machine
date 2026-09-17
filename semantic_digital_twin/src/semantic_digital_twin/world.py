@@ -8,8 +8,9 @@ import threading
 import uuid
 from contextlib import contextmanager
 from copy import deepcopy, copy
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields, is_dataclass
 from functools import wraps, cached_property
+from itertools import chain
 from uuid import UUID
 
 import numpy as np
@@ -36,7 +37,7 @@ from typing_extensions import Type, Set
 
 from krrood.adapters.json_serializer import list_like_classes
 from krrood.class_diagrams.attribute_introspector import DataclassOnlyIntrospector
-from krrood.utils import memoize, clear_memoization_cache
+from krrood.patterns.caching import memoize, clear_memoization_cache
 from semantic_digital_twin.callbacks.callback import ModelChangeCallback
 from semantic_digital_twin.collision_checking.collision_manager import CollisionManager
 from semantic_digital_twin.collision_checking.pybullet_collision_detector import (
@@ -50,6 +51,7 @@ from semantic_digital_twin.exceptions import (
     AlreadyBelongsToAWorldError,
     MissingWorldModificationContextError,
     WorldEntityWithIDNotFoundError,
+    WorldEntityWithIDBelongsToAnotherWorld,
     MissingReferenceFrameError,
     MismatchingPublishChangesAttribute,
     AtomicWorldModificationNotAtomic,
@@ -59,6 +61,8 @@ from semantic_digital_twin.exceptions import (
     WorldContainsOrphanedDegreeOfFreedom,
     BrokenWorldModificationHistoryError,
     MismatchingWorld,
+    InsufficientModificationHistoryError,
+    InvalidRollbackVersionError,
 )
 from semantic_digital_twin.mixin import HasSimulatorProperties
 from semantic_digital_twin.spatial_computations.forward_kinematics import (
@@ -68,7 +72,6 @@ from semantic_digital_twin.spatial_computations.ik_solver import InverseKinemati
 from semantic_digital_twin.spatial_computations.raytracer import RayTracer
 from semantic_digital_twin.spatial_types import (
     HomogeneousTransformationMatrix,
-    Quaternion,
     Point3,
 )
 from semantic_digital_twin.spatial_types.derivatives import Derivatives
@@ -128,6 +131,8 @@ logger = logging.getLogger("semantic_digital_twin")
 GenericSemanticAnnotation = TypeVar(
     "GenericSemanticAnnotation", bound=SemanticAnnotation
 )
+
+RelocatableType = TypeVar("RelocatableType")
 
 FunctionStack = List[Tuple[Callable, Dict[str, Any]]]
 
@@ -383,6 +388,31 @@ def atomic_world_modification(func=None, modification: Type[WorldModification] =
     return _decorate(func)
 
 
+@dataclass(frozen=True)
+class ModelRevision:
+    """
+    Identifies one state of the kinematic structure.
+
+    Two revisions comparing equal mean the structure has not changed in between, so
+    anything derived from it - compiled forward kinematics, for example - is still
+    valid.
+    """
+
+    version: int
+    """
+    :attr:`WorldModelManager.version`, which only advances when a modification block
+    ends.
+    """
+
+    modifications_in_open_block: int
+    """
+    How many modifications the currently open block has recorded so far.
+
+    Distinguishes revisions *within* a still-open block, where ``version`` cannot yet
+    have advanced.
+    """
+
+
 @dataclass
 class WorldModelManager:
     """
@@ -471,6 +501,16 @@ class WorldModelManager:
         """
         with self._publication_order_lock:
             yield
+
+    @property
+    def revision(self) -> ModelRevision:
+        """
+        :return: An identifier for the current state of the kinematic structure.
+        """
+        return ModelRevision(
+            version=self.version,
+            modifications_in_open_block=len(self.current_model_modification_block),
+        )
 
     def update_model_version_and_notify_callbacks(self, **kwargs) -> None:
         """
@@ -643,13 +683,16 @@ class World(HasSimulatorProperties):
         self.collision_manager.add_to_world(self)
 
     @classmethod
-    def create_with_root_body(cls, root_body_name: str = "map") -> World:
+    def create_with_root_body(
+        cls, root_body_name: str = "map", prefix: Optional[str] = None
+    ) -> World:
         """
         Creates a new instance of the World class with a root body.
 
-        :param root_body_name: The unprefixed name of the root body.
+        :param root_body_name: The root body's name.
+        :param prefix: Optional namespace prefix for the root body's name.
         """
-        root_body = Body(name=PrefixedName(root_body_name))
+        root_body = Body(name=PrefixedName(root_body_name, prefix))
         world = World()
         with world.modify_world():
             world.add_body(root_body)
@@ -1107,15 +1150,10 @@ class World(HasSimulatorProperties):
 
         :param connection: The connection to be removed
 
-        .. warning::
+        .. note::
 
-            The reason self.is_connection_in_world is not checked before removing the connection, is because it is using
-            the self.connections internally, which accesses the live rustworkx kinematic_structure. The problem arises
-            if we want to remove the parent or child from the world, before removing the connection from the world.
-            In that case, rustworkx automatically removes the edge representing the connection, which results in
-            self.is_connection_in_world returning False, even though we have not cleaned up the connection properly on
-            our side. The ownership the connection itself records survives that,
-            which is what makes it usable as the check here.
+            A connection whose parent or child was removed first has already left the
+            world with it, so removing it afterwards does nothing.
         """
         if connection._world is not self:
             return
@@ -1138,8 +1176,8 @@ class World(HasSimulatorProperties):
         """
         Removes a kinematic_structure_entity from the world.
 
-        Removing a kinematic_structure_entity this world does not own does nothing
-        and is not recorded, so a history can never open with the removal of a
+        Removing a kinematic_structure_entity this world does not own does nothing and
+        is not recorded, so a history can never open with the removal of a
         kinematic_structure_entity nothing added.
 
         :param kinematic_structure_entity: The kinematic_structure_entity to remove.
@@ -1158,18 +1196,28 @@ class World(HasSimulatorProperties):
         Do not call this function directly, use `remove_kinematic_structure_entity`
         instead.
 
+        Connections still attached to it leave the world with it, as removing its node
+        removes their edges from the kinematic structure.
+
         :param kinematic_structure_entity: The kinematic_structure_entity to remove.
         """
-        self.kinematic_structure.remove_node(kinematic_structure_entity.index)
+        index = kinematic_structure_entity.index
+        attached_edges = chain(
+            self.kinematic_structure.in_edges(index),
+            self.kinematic_structure.out_edges(index),
+        )
+        for _, _, connection in attached_edges:
+            connection.remove_from_world()
+        self.kinematic_structure.remove_node(index)
         kinematic_structure_entity.remove_from_world()
 
     def remove_degree_of_freedom(self, dof: DegreeOfFreedom) -> None:
         """
         Removes a degree of freedom from the world.
 
-        Removing a degree of freedom this world does not own does nothing and is
-        not recorded, so a history can never open with the removal of a degree of
-        freedom nothing added.
+        Removing a degree of freedom this world does not own does nothing and is not
+        recorded, so a history can never open with the removal of a degree of freedom
+        nothing added.
 
         :param dof: The degree of freedom to remove.
         """
@@ -1191,9 +1239,9 @@ class World(HasSimulatorProperties):
         Removes a semantic annotation from the current list of semantic annotations if
         it exists.
 
-        Removing a semantic annotation this world does not own does nothing and is
-        not recorded, so a history can never open with the removal of a semantic
-        annotation nothing added.
+        Removing a semantic annotation this world does not own does nothing and is not
+        recorded, so a history can never open with the removal of a semantic annotation
+        nothing added.
 
         :param semantic_annotation: The semantic annotation instance to be removed.
         """
@@ -1214,9 +1262,8 @@ class World(HasSimulatorProperties):
         """
         Removes an actuator from the current list of actuators if it exists.
 
-        Removing an actuator this world does not own does nothing and is not
-        recorded, so a history can never open with the removal of an actuator
-        nothing added.
+        Removing an actuator this world does not own does nothing and is not recorded,
+        so a history can never open with the removal of an actuator nothing added.
 
         :param actuator: The actuator instance to be removed.
         """
@@ -1555,15 +1602,96 @@ class World(HasSimulatorProperties):
         return self._get_world_entity_by_hash(hash(id))
 
     def get_world_entity_with_id_by_id(self, id: UUID) -> WorldEntityWithID:
-        result = [
-            v
-            for v in self._world_entity_hash_table.values()
-            if isinstance(v, WorldEntityWithID) and v.id == id
-        ]
-        if len(result) == 0:
+        """
+        Get this world's entity with the given id.
+
+        :param id: The id of the entity to get.
+        :return: The entity of this world carrying that id.
+        :raises WorldEntityWithIDNotFoundError: If this world holds no such entity.
+        """
+        entity = self.find_world_entity_with_id(id)
+        if entity is None:
             raise WorldEntityWithIDNotFoundError(id)
-        else:
-            return result[0]
+        return entity
+
+    def find_world_entity_with_id(self, entity_id: UUID) -> Optional[WorldEntityWithID]:
+        """
+        Find this world's entity with the given id, if it holds one.
+
+        .. note:: Semantic annotations are searched in :attr:`semantic_annotations`
+            rather than in the hash table. Their hash describes their content instead
+            of their id, so annotations of the same type over the same kinematic
+            structure entities share one table key and all but the last one added are
+            missing from it.
+
+        :param entity_id: The id of the entity to find.
+        :return: The entity of this world carrying that id, or None if it holds none.
+        """
+        return next(
+            (
+                entity
+                for entity in chain(
+                    self._world_entity_hash_table.values(), self.semantic_annotations
+                )
+                if isinstance(entity, WorldEntityWithID) and entity.id == entity_id
+            ),
+            None,
+        )
+
+    def rebind_world_entities(self, obj: RelocatableType) -> RelocatableType:
+        """
+        Replace every world entity reachable from `obj` with this world's own instance
+        of it.
+
+        `obj` is typically built against a different `World`, for example the one this
+        world was :func:`~copy.deepcopy`'d from, whose bodies and connections this world
+        rebuilt as separate objects. Reading through such a foreign reference is
+        harmless, since execution reads and writes whichever world its context points
+        at, but modifying the model is not: `move_branch` and its kind require the
+        entities they are given to belong to the world being modified.
+
+        Walks `obj` recursively through dataclass fields, list like classes and dict values.
+        A :class:`~semantic_digital_twin.world_description.world_entity.WorldEntityWithID`
+        is looked up here by its id. Anything else is deep-copied, so `obj` and the
+        result never share mutable state.
+
+        An entity this world does not contain is left as it is: it is not this world's
+        state to rebind, and leaving it behaves exactly as not rebinding at all.
+
+        .. note:: An ``init=False`` field a dataclass derives from its other fields in
+            `__post_init__` is carried over as originally computed, not recomputed from
+            the rebound values.
+
+        :param obj: The object to rebind, or a value containing world entities.
+        :return: An equivalent, independent copy of `obj` referring to this world.
+        :raises WorldEntityWithIDBelongsToAnotherWorld: If this world's lookup answers with an
+            entity that reports belonging elsewhere, rather than letting it fail later
+            wherever it ends up being used.
+        """
+        if isinstance(obj, WorldEntityWithID):
+            try:
+                found = self.get_world_entity_with_id_by_id(obj.id)
+            except WorldEntityWithIDNotFoundError:
+                return obj
+            if found._world is not self:
+                raise WorldEntityWithIDBelongsToAnotherWorld(
+                    world=self, world_entity=found
+                )
+            return found
+        if isinstance(obj, list_like_classes):
+            return type(obj)(self.rebind_world_entities(item) for item in obj)
+        if isinstance(obj, dict):
+            return {
+                key: self.rebind_world_entities(value) for key, value in obj.items()
+            }
+        if is_dataclass(obj) and not isinstance(obj, type):
+            result = deepcopy(obj)
+            for f in fields(obj):
+                setattr(
+                    result, f.name, self.rebind_world_entities(getattr(obj, f.name))
+                )
+            return result
+        return deepcopy(obj)
 
     def get_kinematic_structure_entity_by_id(
         self, id: UUID
@@ -1598,6 +1726,30 @@ class World(HasSimulatorProperties):
         return (
             semantic_annotation._world == self
             and semantic_annotation in self.semantic_annotations
+        )
+
+    def get_semantic_annotation_equal_to(
+        self, semantic_annotation: SemanticAnnotation
+    ) -> Optional[SemanticAnnotation]:
+        """
+        The annotation this world holds that describes the same thing, if it holds one.
+
+        An annotation is equal to another when it is of the same type and refers to the
+        same entities, so an annotation built separately can stand for one the world
+        already holds. Use this before adding a freshly built annotation, and wire up
+        the result rather than the argument, or the wiring lands on an annotation the
+        world does not hold.
+
+        :param semantic_annotation: The annotation to look for an equal of.
+        :return: The equal annotation this world holds, or ``None`` when it holds none.
+        """
+        return next(
+            (
+                held_annotation
+                for held_annotation in self.semantic_annotations
+                if held_annotation == semantic_annotation
+            ),
+            None,
         )
 
     def is_body_in_world(self, body: Body) -> bool:
@@ -1699,6 +1851,24 @@ class World(HasSimulatorProperties):
 
             other.clear()
 
+    def _replace_with(self, other: World) -> None:
+        """
+        Replace all entities, kinematic structure, and state with those of `other`,
+        preserving registered callbacks and listeners.
+
+        :param other: The world instance whose content replaces the current world.
+        """
+        model_change_callbacks = list(self._model_manager.model_change_callbacks)
+        state_change_callbacks = list(self.state.state_change_callbacks)
+
+        with self._world_lock:
+            with self.modify_world(publish_changes=False):
+                self.clear()
+            self.merge_world(other)
+            self._model_manager.model_change_callbacks.extend(model_change_callbacks)
+            self.state.state_change_callbacks.extend(state_change_callbacks)
+            self._notify_model_change(publish_changes=False)
+
     def is_kinematic_structure_entity_in_world_by_name(self, name: str) -> bool:
         """
         Checks if there is a kinematic structure entity with the given name in the
@@ -1715,6 +1885,7 @@ class World(HasSimulatorProperties):
         self,
         branch_root: KinematicStructureEntity,
         new_parent: KinematicStructureEntity,
+        enable_unsafe_inside_world_block: bool = False,
     ):
         """
         Destroys the connection between branch_root and its parent, and moves it to a
@@ -1727,8 +1898,15 @@ class World(HasSimulatorProperties):
 
         :param branch_root: The root of the branch to be moved.
         :param new_parent: The new parent of the branch.
+        :param enable_unsafe_inside_world_block: See :meth:`move_branch`.
         """
-        new_parent_T_child = self.compute_forward_kinematics(new_parent, branch_root)
+        if not enable_unsafe_inside_world_block:
+            # Ensure FK is up to date before computing the relative pose, since this may be
+            # called mid-block, e.g. from a mount strategy inside a still-open modify_world block.
+            self.update_forward_kinematics()
+        new_parent_T_child = self.compute_forward_kinematics(
+            new_parent, branch_root, enable_unsafe_inside_world_block
+        )
         self.remove_connection(branch_root.parent_connection)
         self.add_connection(
             FixedConnection(
@@ -1951,7 +2129,9 @@ class World(HasSimulatorProperties):
         self._model_manager.update_model_version_and_notify_callbacks(
             publish_changes=publish_changes, **kwargs
         )
-        self.notify_state_change(publish_changes=publish_changes, **kwargs)
+        self.notify_state_change(
+            publish_changes=publish_changes, force_republish=True, **kwargs
+        )
 
         for callback in list(self.state.state_change_callbacks):
             callback.update_previous_world_state()
@@ -2300,15 +2480,21 @@ class World(HasSimulatorProperties):
 
     def update_forward_kinematics(self) -> None:
         """
-        Recompile and recompute forward kinematics of the world.
+        Bring the forward kinematics of the world up to date.
+
+        The expressions are recompiled only when the kinematic structure has changed
+        since they were last built, which is what makes this affordable to call
+        defensively. The values are always recomputed, because degree-of-freedom state
+        can change without any model change and leaves no trace in
+        :class:`ModelRevision`.
 
         ..warning::
             Use this method if you need to live update the forward kinematic inside a with self.modify_world(): block.
             Use with caution, as this only works if the world structure is not currently broken, and thus may lead to
-            crashes if its not the case. Also using this in a method that is called a lot, it may cause performance
-            issues because of unnecessary recompilations.
+            crashes if its not the case.
         """
-        self._forward_kinematic_manager.notify_model_change()
+        if not self._forward_kinematic_manager.matches_world_structure:
+            self._forward_kinematic_manager.notify_model_change()
         self._forward_kinematic_manager.recompute()
 
     def _manually_compute_entity_a_T_entity_b(
@@ -2452,20 +2638,14 @@ class World(HasSimulatorProperties):
         """
         Transform a given spatial object from its reference frame to a target frame.
 
-        Calculate the transformation from the reference frame of the provided
-        spatial object to the specified target frame. Apply the transformation
-        differently depending on the type of the spatial object:
-
-        - If the object is a Quaternion, compute its rotation matrix, transform it, and
-          convert back to a Quaternion.
-        - For other types, apply the transformation matrix directly.
+        How the transformation applies is the spatial type's own business -- see
+        :meth:`~semantic_digital_twin.spatial_types.spatial_types.SpatialType.transform`
+        -- so a type that needs more than a matrix multiplication says so itself.
 
         :param spatial_object: The spatial object to be transformed.
         :param target_frame: The target KinematicStructureEntity frame to which the spatial object should
             be transformed.
-        :return: The spatial object transformed to the target frame. If the input object
-            is a Quaternion, the returned object is a Quaternion. Otherwise, it is the
-            transformed spatial object.
+        :return: The spatial object, of the same type, expressed in the target frame.
         """
         if spatial_object.reference_frame is None:
             raise MissingReferenceFrameError(spatial_object)
@@ -2475,13 +2655,7 @@ class World(HasSimulatorProperties):
             root=target_frame, tip=spatial_object.reference_frame
         )
 
-        match spatial_object:
-            case Quaternion():
-                reference_frame_R = spatial_object.to_rotation_matrix()
-                target_frame_R = target_frame_T_reference_frame @ reference_frame_R
-                return target_frame_R.to_quaternion()
-            case _:
-                return target_frame_T_reference_frame @ spatial_object
+        return spatial_object.transform(target_frame_T_reference_frame)
 
     def __deepcopy__(self, memo):
         memo = {} if memo is None else memo
@@ -2559,6 +2733,60 @@ class World(HasSimulatorProperties):
 
     def get_world_model_manager(self) -> WorldModelManager:
         return self._model_manager
+
+    def rollback_modification_blocks(
+        self, count: int = 1
+    ) -> List[WorldModelModificationBlock]:
+        """
+        Revert the most recently completed modification blocks, restoring the world to
+        the state it was in before they were applied.
+
+        Reverting a block is itself recorded as a new modification block (see
+        :meth:`WorldModification.revert`), so the history retains a full account of what
+        happened, including the rollback.
+
+        :param count: How many of the most recently completed modification blocks to
+            revert, starting with the most recent.
+        :return: The modification blocks that were rolled back, most recent first.
+        :raises InsufficientModificationHistoryError: If the history contains fewer than
+            ``count`` completed modification blocks.
+        """
+        model_modification_blocks = self._model_manager.model_modification_blocks
+        if count > len(model_modification_blocks):
+            raise InsufficientModificationHistoryError(
+                world=self,
+                requested_count=count,
+                available_count=len(model_modification_blocks),
+            )
+        # count == 0 has to be handled explicitly: model_modification_blocks[-0:] is
+        # model_modification_blocks[0:], i.e. the whole list, not an empty slice.
+        blocks_to_roll_back = (
+            list(reversed(model_modification_blocks[-count:])) if count else []
+        )
+        for block in blocks_to_roll_back:
+            with self.modify_world():
+                block.revert(self)
+        return blocks_to_roll_back
+
+    def rollback_to_version(self, version: int) -> List[WorldModelModificationBlock]:
+        """
+        Roll back the world's modification history to the given version, undoing every
+        modification block completed since.
+
+        :param version: The target :attr:`WorldModelManager.version` to roll back to,
+            e.g. taken from an earlier :attr:`WorldModelManager.revision`.
+        :return: The modification blocks that were rolled back, most recent first.
+        :raises InvalidRollbackVersionError: If ``version`` is not a version the world
+            has already reached.
+        """
+        current_version = self._model_manager.version
+        if not 0 <= version <= current_version:
+            raise InvalidRollbackVersionError(
+                world=self,
+                target_version=version,
+                current_version=current_version,
+            )
+        return self.rollback_modification_blocks(current_version - version)
 
     @cached_property
     def ray_tracer(self) -> RayTracer:

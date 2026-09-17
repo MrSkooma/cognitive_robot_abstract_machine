@@ -164,7 +164,8 @@ class ShapeToRos2Converter(SemDTToRos2Converter[InputType, Marker]):
     @classmethod
     def convert(cls, data: InputType) -> Marker:
         marker = visualization_msgs.Marker()
-        marker.header.frame_id = str(data.origin.reference_frame.name)
+        reference_frame = data.origin.reference_frame
+        marker.header.frame_id = str(reference_frame.name)
         marker.color = ColorToRos2Converter.convert(data.color)
         marker.pose = PoseToRos2Converter.convert(data.origin.to_pose())
         return marker
@@ -216,7 +217,7 @@ class FileMeshToRos2Converter(ShapeToRos2Converter[Mesh]):
     def convert(cls, data: Mesh) -> Marker:
         marker = super().convert(data)
         marker.type = visualization_msgs.Marker.MESH_RESOURCE
-        marker.mesh_resource = "file://" + data.filename
+        marker.mesh_resource = "file://" + str(data.local_file)
         marker.scale.x = data.scale.x
         marker.scale.y = data.scale.y
         marker.scale.z = data.scale.z
