@@ -49,14 +49,8 @@ def _edge_responsibility(
     log_parent_likelihood: jax.Array,
 ) -> tuple[jax.Array, jax.Array]:
     """
-    Compute the per-sample log-responsibility of a sum unit edge and its expected count.
-
-    :param log_parent_responsibility: The per-sample log-responsibility of the parent.
-    :param log_edge_weight: The log mixture weight of the edge.
-    :param log_child_likelihood: The per-sample log-likelihood of the child.
-    :param log_parent_likelihood: The per-sample log-likelihood of the parent.
-    :return: The per-sample log-responsibility of the edge and its expected count summed
-        over samples.
+    :return: The per-row log-responsibility of a sum unit edge and its expected count,
+        summed over rows.
     """
     log_responsibility = (
         log_parent_responsibility
@@ -73,10 +67,8 @@ def _edge_responsibility(
 @jax.jit
 def _normalized_log_weights(counts: jax.Array) -> jax.Array:
     """
-    Normalize positive expected counts into log mixture weights.
-
-    :param counts: Smoothed expected counts per child.
-    :return: The log of the share of each count, floored at
+    :param counts: Smoothed expected count of every child.
+    :return: The log of every count's share, floored at
         :data:`MINIMUM_MIXTURE_PROPORTION`.
     """
     proportions = counts / jnp.sum(counts)
@@ -88,12 +80,8 @@ def _weighted_gaussian_parameters(
     values: jax.Array, weights: jax.Array
 ) -> tuple[jax.Array, jax.Array]:
     """
-    Compute the weighted mean and standard deviation of ``values``.
-
-    :param values: Per-sample observations of the variable.
-    :param weights: Non-negative responsibilities per sample.
-    :return: The weighted mean and standard deviation, with the variance floored at
-        :data:`MINIMUM_GAUSSIAN_VARIANCE`.
+    :return: The weighted mean and standard deviation of ``values``, the variance
+        floored at :data:`MINIMUM_GAUSSIAN_VARIANCE`.
     """
     total_weight = jnp.sum(weights)
     mean = jnp.sum(weights * values) / total_weight
@@ -105,24 +93,24 @@ def _weighted_gaussian_parameters(
 @dataclass(frozen=True)
 class LearnableUnits:
     """
-    The units of a progressive circuit whose parameters learning a column may update.
+    The units whose parameters learning a column updates.
     """
 
     sum_units: frozenset[SumUnit]
     """
-    Sum units whose mixture weights may be updated.
+    Sum units whose weights are updated.
     """
 
     leaf_units: frozenset[LeafUnit]
     """
-    Leaf units whose distribution parameters may be updated.
+    Leaf units whose distributions are updated.
     """
 
 
 @dataclass(frozen=True)
 class Edge:
     """
-    An edge of a circuit, identified by the indices of its units.
+    An edge, identified by the indices of its units.
     """
 
     parent_index: int
@@ -144,17 +132,17 @@ class ExpectationStepResult:
 
     average_log_likelihood: float
     """
-    Average log-likelihood of the data under the complete circuit.
+    Average log-likelihood of the rows under the whole circuit.
     """
 
     log_responsibilities: dict[int, jax.Array]
     """
-    Per-sample log-responsibility of every reached unit, keyed by unit index.
+    Per-row log-responsibility of every reached unit, keyed by unit index.
     """
 
     edge_expected_counts: dict[Edge, float]
     """
-    Expected count of every sum unit edge.
+    Expected count of every edge below a sum unit.
     """
 
 
@@ -162,51 +150,47 @@ class ExpectationStepResult:
 @dataclass
 class ProgressiveExpectationMaximization:
     """
-    Expectation maximization for a single column of a progressive probabilistic circuit.
+    Expectation maximization for one column of a progressive probabilistic circuit.
 
-    While a column is learned, the root gives it the whole weight, so the column is
-    trained as the only model of its task; responsibilities still flow into earlier
-    columns through the edges the column has to them. The maximization step only updates
-    the units of the learned column; units of every other column stay unchanged. After
-    learning, the root mixture weights every column by its share of all samples the
-    columns were learned from.
+    While the column is learned, the root gives it the whole weight, so it is trained as
+    the only model of its task; it still reaches earlier columns through its edges to
+    them. Only the units of the column are updated. Afterwards the root weights every
+    column by its share of all rows the columns were learned from.
 
     .. warning::
 
         Later columns read from earlier ones, so learning an earlier column again also
-        changes the output of later columns.
+        changes the later columns.
     """
 
     progressive_circuit: ProgressiveProbabilisticCircuit
     """
-    The progressive circuit whose columns are learned.
+    The circuit whose columns are learned.
     """
 
     smoothing: float = DEFAULT_SMOOTHING
     """
-    Additive smoothing term for the expected counts of sum unit edges.
+    Added to the expected count of every edge below a sum unit.
     """
 
     def learn(
         self, data: npt.NDArray, column: CircuitColumn, epochs: int = 1
     ) -> list[float]:
         """
-        Learn the parameters of a column from data.
+        Learn the parameters of a column.
 
-        :param data: Data with one row per sample, ordered like the variables of the
-            progressive circuit.
-        :param column: The column to learn.
+        :param data: One row per sample, columns ordered like the circuit's variables.
         :param epochs: Number of expectation maximization iterations.
-        :return: The average log-likelihood of the data under the column before each
+        :return: The average log-likelihood of the rows under the column before every
             iteration.
-        :raises UnregisteredColumnError: If the column does not belong to the
-            progressive circuit.
-        :raises IncompatibleVariableDomainError: If the domain of the column contains
-            variables its root does not model.
-        :raises UnsupportedVariableDomainChangeError: If the domain of the column or of
-            the progressive circuit changed after the column was created.
-        :raises UnsupportedLeafDistributionError: If the column contains a leaf that
-            cannot be learned from weighted data.
+        :raises UnregisteredColumnError: If the column belongs to another progressive
+            circuit.
+        :raises IncompatibleVariableDomainError: If the variable domain of the column
+            contains variables its root does not model.
+        :raises UnsupportedVariableDomainChangeError: If a variable domain changed after
+            the column was created.
+        :raises UnsupportedLeafDistributionError: If the column has a leaf that cannot
+            be learned.
         """
         self.progressive_circuit.validate_column(column)
         data = np.asarray(data)
@@ -226,10 +210,9 @@ class ProgressiveExpectationMaximization:
 
     def learnable_units(self, column: CircuitColumn) -> LearnableUnits:
         """
-        :param column: The column to learn.
         :return: The sum and leaf units of the column.
-        :raises UnsupportedLeafDistributionError: If the column contains a leaf that
-            cannot be learned from weighted data.
+        :raises UnsupportedLeafDistributionError: If the column has a leaf that cannot
+            be learned.
         """
         units = self.progressive_circuit.units_of(column)
         leaf_units = frozenset(unit for unit in units if isinstance(unit, LeafUnit))
@@ -243,11 +226,8 @@ class ProgressiveExpectationMaximization:
 
     def _expectation_step(self, data: npt.NDArray) -> ExpectationStepResult:
         """
-        Evaluate the complete circuit and propagate the posterior responsibilities from
-        the root to every reached unit.
-
-        :param data: Data with one row per sample.
-        :return: The posterior statistics.
+        Evaluate the whole circuit and pass the responsibilities from the root down to
+        every reached unit.
         """
         circuit = self.progressive_circuit.circuit
         average_log_likelihood = float(np.mean(circuit.log_likelihood(data)))
@@ -295,11 +275,7 @@ class ProgressiveExpectationMaximization:
         log_responsibility: jax.Array,
     ) -> None:
         """
-        Add a log-responsibility to the responsibilities already collected for a unit.
-
-        :param log_responsibilities: Collected log-responsibilities, keyed by unit index.
-        :param unit_index: Index of the receiving unit.
-        :param log_responsibility: The per-sample log-responsibility to add.
+        Add a per-row log-responsibility to those already collected for a unit.
         """
         if unit_index in log_responsibilities:
             log_responsibility = jnp.logaddexp(
@@ -314,11 +290,7 @@ class ProgressiveExpectationMaximization:
         data: npt.NDArray,
     ) -> None:
         """
-        Update the mixture weights and leaf distributions of the learnable units.
-
-        :param learnable_units: The units that may be updated.
-        :param expectation: The posterior statistics of the expectation step.
-        :param data: Data with one row per sample.
+        Update the weights and leaf distributions of the learnable units.
         """
         circuit = self.progressive_circuit.circuit
         for sum_unit in learnable_units.sum_units:
@@ -355,12 +327,10 @@ class ProgressiveExpectationMaximization:
         variable_to_index_map: dict[Variable, int],
     ) -> None:
         """
-        Fit the distribution of a leaf unit to weighted data in place.
+        Fit the distribution of a leaf to the weighted rows, in place.
 
-        :param leaf_unit: The leaf unit to update.
-        :param data: Data with one row per sample.
-        :param weights: Positive total, non-negative responsibilities per sample.
-        :param variable_to_index_map: Map from each variable to its column in the data.
+        :param weights: Non-negative responsibility of every row, with a positive total.
+        :param variable_to_index_map: Column of every variable in ``data``.
         """
         distribution = leaf_unit.distribution
         values = data[:, variable_to_index_map[distribution.variable]]

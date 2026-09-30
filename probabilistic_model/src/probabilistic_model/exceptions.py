@@ -71,8 +71,7 @@ class ShapeMismatchError(DataclassException, ValueError):
 @dataclass
 class IncompatibleVariableDomainError(DataclassException):
     """
-    Exception raised when a requested variable domain contains variables the circuit
-    does not model.
+    Raised when a variable domain contains variables the circuit does not model.
     """
 
     variable_domain: tuple[Variable, ...]
@@ -93,24 +92,24 @@ class IncompatibleVariableDomainError(DataclassException):
         )
 
     def suggest_correction(self) -> str:
-        return ""
+        return "Choose a subset of the variables the circuit models."
 
 
 @dataclass
 class ColumnsDivergedError(DataclassException, ABC):
     """
-    Exception raised when two columns of a progressive circuit do not share the same
-    structure at an aligned position.
+    Raised when two columns of a progressive circuit differ in structure at an aligned
+    position.
     """
 
     left: Unit
     """
-    The unit of the first column at the diverging position.
+    The unit of the first column at that position.
     """
 
     right: Unit
     """
-    The unit of the second column at the diverging position.
+    The unit of the second column at that position.
     """
 
     def suggest_correction(self) -> str:
@@ -120,7 +119,7 @@ class ColumnsDivergedError(DataclassException, ABC):
 @dataclass
 class UnitTypeMismatchError(ColumnsDivergedError):
     """
-    Exception raised when aligned units of two columns have different types.
+    Raised when aligned units of two columns have different types.
     """
 
     def error_message(self) -> str:
@@ -133,18 +132,18 @@ class UnitTypeMismatchError(ColumnsDivergedError):
 @dataclass
 class ChildCountMismatchError(ColumnsDivergedError):
     """
-    Exception raised when aligned units of two columns have a different number of
-    children within their columns.
+    Raised when aligned units of two columns have different numbers of children within
+    their columns.
     """
 
     left_child_count: int
     """
-    The number of children of :attr:`left` within its column.
+    Number of children of :attr:`left` within its column.
     """
 
     right_child_count: int
     """
-    The number of children of :attr:`right` within its column.
+    Number of children of :attr:`right` within its column.
     """
 
     def error_message(self) -> str:
@@ -157,7 +156,7 @@ class ChildCountMismatchError(ColumnsDivergedError):
 @dataclass
 class ScopeMismatchError(ColumnsDivergedError):
     """
-    Exception raised when aligned units of two columns model different variables.
+    Raised when aligned units of two columns model different variables.
     """
 
     def error_message(self) -> str:
@@ -171,13 +170,12 @@ class ScopeMismatchError(ColumnsDivergedError):
 @dataclass
 class UnregisteredColumnError(DataclassException):
     """
-    Exception raised when a column is used with a progressive circuit it does not belong
-    to.
+    Raised when a column is used with a progressive circuit it does not belong to.
     """
 
     task_id: str
     """
-    The task identifier of the unregistered column.
+    Task identifier of the column.
     """
 
     def error_message(self) -> str:
@@ -190,10 +188,10 @@ class UnregisteredColumnError(DataclassException):
 @dataclass
 class UnsupportedLeafDistributionError(DataclassException):
     """
-    Exception raised when a leaf distribution cannot be learned from weighted data.
+    Raised when a leaf distribution cannot be learned from weighted rows.
     """
 
-    distribution: Any
+    distribution: ProbabilisticModel
     """
     The distribution that cannot be learned.
     """
@@ -211,13 +209,13 @@ class UnsupportedLeafDistributionError(DataclassException):
 @dataclass
 class UnsupportedVariableDomainChangeError(DataclassException):
     """
-    Exception raised when the variable domain of a progressive circuit or one of its
-    columns differs from the domain its existing columns were created with.
+    Raised when the variable domain of a progressive circuit or a column differs from
+    the one its columns were created with.
     """
 
     column_domain: tuple[Variable, ...]
     """
-    The variable domain the existing columns were created with.
+    The variable domain the columns were created with.
     """
 
     requested_domain: tuple[Variable, ...]

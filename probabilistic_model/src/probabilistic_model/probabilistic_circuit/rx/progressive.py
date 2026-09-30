@@ -28,37 +28,41 @@ from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import (
 @dataclass
 class CircuitColumn:
     """
-    A task-specific copy of a template circuit inside a progressive circuit.
+    The copy of the template that models one task inside a progressive circuit.
 
     .. note::
 
-        The units of the column are recorded when it is created, so it must be created
-        before any edges from it to other columns exist.
+        The column records its units when it is created, so it must be created before
+        edges from it to other columns exist.
     """
 
     task_id: str
     """
-    Identifier of the task this column represents.
+    Identifier of the task.
     """
 
     root: Unit
     """
-    Root unit of this column.
+    Root unit of the column.
     """
 
     variable_domain: tuple[Variable, ...] | None = None
     """
-    Variables this column models; defaults to the variables of :attr:`root`.
+    Variables of the task, a subset of the variables of :attr:`root`; defaults to all of
+    them.
+
+    The column itself always models every variable of :attr:`root`.
     """
 
     unit_indices: frozenset[int] = field(init=False)
     """
-    Indices of every unit owned by this column.
+    Indices of the units the column owns.
     """
 
     sample_count: int = field(default=0, init=False)
     """
-    Number of samples this column was learned from.
+    Number of rows the column was learned from, summed over every call of :meth:`~probab
+    ilistic_model.learning.progressive.ProgressiveExpectationMaximization.learn`.
     """
 
     def __post_init__(self):
@@ -72,9 +76,8 @@ class CircuitColumn:
 
     def validate_variable_domain(self) -> None:
         """
-        Check that :attr:`variable_domain` only contains variables of :attr:`root`.
-
-        :raises IncompatibleVariableDomainError: If it contains other variables.
+        :raises IncompatibleVariableDomainError: If :attr:`variable_domain` contains
+            variables :attr:`root` does not model.
         """
         available_variables = tuple(self.root.variables)
         if not set(self.variable_domain).issubset(available_variables):
@@ -84,16 +87,15 @@ class CircuitColumn:
 
     def contains(self, unit: Unit) -> bool:
         """
-        :param unit: A unit of the circuit this column belongs to.
-        :return: Whether the unit is owned by this column.
+        :return: Whether the column owns the unit.
         """
         return unit.index in self.unit_indices
 
     def children_of(self, unit: Unit) -> list[Unit]:
         """
-        :param unit: A unit owned by this column.
-        :return: The children of the unit that are owned by this column, excluding edges
-            into other columns.
+        :param unit: A unit the column owns.
+        :return: The children of the unit that the column owns, without those in other
+            columns.
         """
         return [child for child in unit.subcircuits if self.contains(child)]
 
@@ -120,27 +122,30 @@ class AlignedUnits:
 @dataclass
 class ProgressiveProbabilisticCircuit:
     """
-    A probabilistic circuit that learns tasks one after another in separate columns,
-    following the idea of progressive neural networks.
+    A probabilistic circuit that learns tasks one after another, one column per task, as
+    progressive neural networks do.
 
-    Every column is a copy of :attr:`template`. Each sum unit of a new column receives
-    the aligned sum units of every earlier column as additional children, so the new
-    column can reuse what earlier columns learned while their own units stay unchanged.
+    Every column is a copy of :attr:`template`. Each sum unit of a new column also mixes
+    the aligned sum units of every earlier column, so the new column can reuse them
+    while they stay unchanged.
     """
 
     template: ProbabilisticCircuit
     """
-    Circuit copied to create the initial structure and parameters of each column.
+    Circuit every column is copied from, structure and initial parameters.
     """
 
     variable_domain: tuple[Variable, ...] | None = None
     """
-    Variables every column models; defaults to the variables of :attr:`template`.
+    Variables of the tasks, a subset of the variables of :attr:`template`; defaults to
+    all of them.
+
+    Every column still models every variable of :attr:`template`.
     """
 
     columns: list[CircuitColumn] = field(default_factory=list, init=False)
     """
-    Columns of this progressive circuit, oldest first.
+    The columns, oldest first.
     """
 
     circuit: ProbabilisticCircuit = field(init=False)
@@ -150,7 +155,7 @@ class ProgressiveProbabilisticCircuit:
 
     root: SumUnit = field(init=False)
     """
-    Sum unit mixing over the roots of every column.
+    Sum unit mixing the roots of all columns.
     """
 
     def __post_init__(self):
@@ -162,12 +167,10 @@ class ProgressiveProbabilisticCircuit:
 
     def validate_variable_domain(self) -> None:
         """
-        Check that :attr:`variable_domain` only contains variables of :attr:`template`
-        and still matches the domain of every existing column.
-
-        :raises IncompatibleVariableDomainError: If it contains other variables.
-        :raises UnsupportedVariableDomainChangeError: If it changed after columns were
-            created.
+        :raises IncompatibleVariableDomainError: If :attr:`variable_domain` contains
+            variables :attr:`template` does not model.
+        :raises UnsupportedVariableDomainChangeError: If :attr:`variable_domain` changed
+            after columns were created.
         """
         available_variables = tuple(self.template.variables)
         if not set(self.variable_domain).issubset(available_variables):
@@ -182,16 +185,12 @@ class ProgressiveProbabilisticCircuit:
 
     def validate_column(self, column: CircuitColumn) -> None:
         """
-        Check that a column belongs to this progressive circuit and that its variable
-        domain is still usable.
-
-        :param column: The column to check.
-        :raises UnregisteredColumnError: If the column does not belong to this
-            progressive circuit.
-        :raises IncompatibleVariableDomainError: If the domain of the column contains
-            variables its root does not model.
-        :raises UnsupportedVariableDomainChangeError: If the domain of the column
-            differs from :attr:`variable_domain`.
+        :raises UnregisteredColumnError: If the column belongs to another progressive
+            circuit.
+        :raises IncompatibleVariableDomainError: If the variable domain of the column
+            contains variables its root does not model.
+        :raises UnsupportedVariableDomainChangeError: If the variable domain of the
+            column differs from :attr:`variable_domain`.
         """
         if column not in self.columns:
             raise UnregisteredColumnError(column.task_id)
@@ -205,7 +204,6 @@ class ProgressiveProbabilisticCircuit:
         """
         Add a column for a new task, connected to every earlier column.
 
-        :param task_id: Identifier of the new task.
         :return: The new column.
         :raises IncompatibleVariableDomainError: If :attr:`variable_domain` contains
             variables the template does not model.
@@ -231,11 +229,8 @@ class ProgressiveProbabilisticCircuit:
         self, column: CircuitColumn, earlier_column: CircuitColumn
     ) -> None:
         """
-        Add every sum unit of an earlier column as a child of the aligned sum unit of
-        ``column`` and renormalize the receiving sum units.
-
-        :param column: The column receiving the new edges.
-        :param earlier_column: The column whose sum units become children.
+        Make every sum unit of ``earlier_column`` a child of the aligned sum unit of
+        ``column``.
         """
         aligned_sum_units = [
             aligned
@@ -248,12 +243,10 @@ class ProgressiveProbabilisticCircuit:
 
     def restrict_root_to(self, column: CircuitColumn) -> None:
         """
-        Give the whole weight of :attr:`root` to one column, so the circuit models the
-        data by that column alone.
+        Give the whole weight of :attr:`root` to one column.
 
-        :param column: The column to give the weight to.
-        :raises UnregisteredColumnError: If the column does not belong to this
-            progressive circuit.
+        :raises UnregisteredColumnError: If the column belongs to another progressive
+            circuit.
         """
         if column not in self.columns:
             raise UnregisteredColumnError(column.task_id)
@@ -266,10 +259,8 @@ class ProgressiveProbabilisticCircuit:
 
     def weight_root_by_sample_count(self) -> None:
         """
-        Set the weight of every column below :attr:`root` to its share of all samples
-        the columns were learned from.
-
-        Nothing changes while no column was learned from any samples.
+        Weight every column below :attr:`root` by its share of all rows the columns were
+        learned from; nothing changes before any column was learned.
         """
         total_sample_count = sum(column.sample_count for column in self.columns)
         if total_sample_count == 0:
@@ -286,13 +277,9 @@ class ProgressiveProbabilisticCircuit:
         self, left: CircuitColumn, right: CircuitColumn
     ) -> Iterator[AlignedUnits]:
         """
-        Walk two columns in parallel and yield the units at matching positions.
+        Walk two columns in parallel, without following edges between columns.
 
-        Edges between columns are not followed.
-
-        :param left: The first column.
-        :param right: The second column.
-        :return: The aligned units, starting with the roots of both columns.
+        :return: The units at matching positions, starting with the roots.
         :raises ColumnsDivergedError: If the columns differ in structure.
         """
         queue: deque[AlignedUnits] = deque([AlignedUnits(left.root, right.root)])
@@ -323,7 +310,6 @@ class ProgressiveProbabilisticCircuit:
 
     def units_of(self, column: CircuitColumn) -> set[Unit]:
         """
-        :param column: A column of this progressive circuit.
-        :return: Every unit owned by the column.
+        :return: The units the column owns.
         """
         return {self.circuit.graph[index] for index in column.unit_indices}
