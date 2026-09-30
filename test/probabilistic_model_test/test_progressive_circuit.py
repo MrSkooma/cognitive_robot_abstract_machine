@@ -173,15 +173,41 @@ def test_add_column_registers_column_below_normalized_root():
         template=_make_factorized_template("x", "y")
     )
 
-    column = progressive_circuit.add_column(
-        task_id="task-a", task_context={"dataset": "d1"}
-    )
+    column = progressive_circuit.add_column(task_id="task-a")
 
     assert progressive_circuit.columns == [column]
-    assert column.task_context == {"dataset": "d1"}
     assert progressive_circuit.circuit.root is progressive_circuit.root
     assert progressive_circuit.circuit.has_edge(progressive_circuit.root, column.root)
     assert progressive_circuit.root.is_normalized()
+
+
+def test_restrict_root_to_gives_whole_root_weight_to_column():
+    progressive_circuit = ProgressiveProbabilisticCircuit(
+        template=_make_factorized_template("x", "y")
+    )
+    column = progressive_circuit.add_column(task_id="task-a")
+    other_column = progressive_circuit.add_column(task_id="task-b")
+
+    progressive_circuit.restrict_root_to(column)
+
+    graph = progressive_circuit.circuit.graph
+    assert graph.get_edge_data(progressive_circuit.root.index, column.root.index) == 0.0
+    assert (
+        graph.get_edge_data(progressive_circuit.root.index, other_column.root.index)
+        == -np.inf
+    )
+
+
+def test_restrict_root_to_rejects_unregistered_column():
+    progressive_circuit = ProgressiveProbabilisticCircuit(
+        template=_make_factorized_template("x")
+    )
+    foreign_column = ProgressiveProbabilisticCircuit(
+        template=_make_factorized_template("x")
+    ).add_column(task_id="task-a")
+
+    with pytest.raises(UnregisteredColumnError):
+        progressive_circuit.restrict_root_to(foreign_column)
 
 
 def test_new_column_reads_from_earlier_column():
@@ -373,7 +399,7 @@ def test_units_of_columns_are_disjoint():
 
 
 # %% learning
-def test_learnable_units_are_root_and_column_units():
+def test_learnable_units_are_column_units():
     progressive_circuit = ProgressiveProbabilisticCircuit(
         template=_make_mixture_template("x", "y")
     )
@@ -385,7 +411,7 @@ def test_learnable_units_are_root_and_column_units():
         progressive_circuit
     ).learnable_units(column)
 
-    assert learnable_units.sum_units == {progressive_circuit.root} | {
+    assert learnable_units.sum_units == {
         unit for unit in column_units if isinstance(unit, SumUnit)
     }
     assert learnable_units.leaf_units == {
@@ -491,6 +517,62 @@ def test_learning_new_column_reuses_earlier_column_that_explains_data():
         )
         > weight_before
     )
+
+
+def test_learning_new_column_trains_it_as_only_model_of_its_task():
+    progressive_circuit = ProgressiveProbabilisticCircuit(
+        template=_make_mixture_template("x", "y")
+    )
+    learner = ProgressiveExpectationMaximization(progressive_circuit)
+    random = np.random.default_rng(0)
+    earlier_column = progressive_circuit.add_column(task_id="task-a")
+    learner.learn(random.normal(size=(50, 2)), earlier_column, epochs=3)
+    column = progressive_circuit.add_column(task_id="task-b")
+    data = random.normal(loc=10.0, size=(50, 2))
+    column_likelihood_before = np.mean(
+        _column_log_likelihood(progressive_circuit, column, data)
+    )
+
+    history = learner.learn(data, column, epochs=1)
+
+    assert history[0] == pytest.approx(column_likelihood_before)
+
+
+def test_learn_accumulates_sample_count_of_column():
+    progressive_circuit = ProgressiveProbabilisticCircuit(
+        template=_make_factorized_template("x")
+    )
+    column = progressive_circuit.add_column(task_id="task-a")
+    learner = ProgressiveExpectationMaximization(progressive_circuit)
+    random = np.random.default_rng(0)
+    first_data = random.normal(size=(30, 1))
+    second_data = random.normal(size=(20, 1))
+
+    learner.learn(first_data, column, epochs=2)
+    learner.learn(second_data, column, epochs=2)
+
+    assert column.sample_count == len(first_data) + len(second_data)
+
+
+def test_learn_weights_root_edges_by_share_of_samples():
+    progressive_circuit = ProgressiveProbabilisticCircuit(
+        template=_make_mixture_template("x", "y")
+    )
+    learner = ProgressiveExpectationMaximization(progressive_circuit)
+    random = np.random.default_rng(0)
+    earlier_column = progressive_circuit.add_column(task_id="task-a")
+    learner.learn(random.normal(size=(30, 2)), earlier_column, epochs=3)
+    column = progressive_circuit.add_column(task_id="task-b")
+    learner.learn(random.normal(loc=10.0, size=(90, 2)), column, epochs=3)
+
+    total_sample_count = earlier_column.sample_count + column.sample_count
+    for learned_column in progressive_circuit.columns:
+        log_weight = progressive_circuit.circuit.graph.get_edge_data(
+            progressive_circuit.root.index, learned_column.root.index
+        )
+        assert np.exp(log_weight) == pytest.approx(
+            learned_column.sample_count / total_sample_count
+        )
 
 
 def test_learn_rejects_unregistered_column():

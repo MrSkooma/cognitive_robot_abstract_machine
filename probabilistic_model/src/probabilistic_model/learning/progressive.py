@@ -164,10 +164,12 @@ class ProgressiveExpectationMaximization:
     """
     Expectation maximization for a single column of a progressive probabilistic circuit.
 
-    The expectation step evaluates the complete circuit, so responsibilities also flow
-    through earlier columns. The maximization step only updates the units of the learned
-    column; units of every other column stay unchanged. After learning, the root mixture
-    weights every column by its share of all samples the columns were learned from.
+    While a column is learned, the root gives it the whole weight, so the column is
+    trained as the only model of its task; responsibilities still flow into earlier
+    columns through the edges the column has to them. The maximization step only updates
+    the units of the learned column; units of every other column stay unchanged. After
+    learning, the root mixture weights every column by its share of all samples the
+    columns were learned from.
 
     .. warning::
 
@@ -195,7 +197,8 @@ class ProgressiveExpectationMaximization:
             progressive circuit.
         :param column: The column to learn.
         :param epochs: Number of expectation maximization iterations.
-        :return: The average log-likelihood of the data before each iteration.
+        :return: The average log-likelihood of the data under the column before each
+            iteration.
         :raises UnregisteredColumnError: If the column does not belong to the
             progressive circuit.
         :raises IncompatibleVariableDomainError: If the domain of the column contains
@@ -211,6 +214,7 @@ class ProgressiveExpectationMaximization:
             return []
 
         learnable_units = self.learnable_units(column)
+        self.progressive_circuit.restrict_root_to(column)
         history = []
         for _ in range(epochs):
             expectation = self._expectation_step(data)

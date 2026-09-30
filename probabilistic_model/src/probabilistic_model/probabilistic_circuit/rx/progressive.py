@@ -8,7 +8,6 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 
 from random_events.variable import Variable
-from typing_extensions import Any
 
 from probabilistic_model.exceptions import (
     ChildCountMismatchError,
@@ -50,11 +49,6 @@ class CircuitColumn:
     variable_domain: tuple[Variable, ...] | None = None
     """
     Variables this column models; defaults to the variables of :attr:`root`.
-    """
-
-    task_context: dict[str, Any] = field(default_factory=dict)
-    """
-    Metadata describing the task, kept alongside the column.
     """
 
     unit_indices: frozenset[int] = field(init=False)
@@ -144,11 +138,6 @@ class ProgressiveProbabilisticCircuit:
     Variables every column models; defaults to the variables of :attr:`template`.
     """
 
-    task_context: dict[str, Any] = field(default_factory=dict)
-    """
-    Metadata describing this progressive circuit as a whole.
-    """
-
     columns: list[CircuitColumn] = field(default_factory=list, init=False)
     """
     Columns of this progressive circuit, oldest first.
@@ -212,14 +201,11 @@ class ProgressiveProbabilisticCircuit:
                 tuple(self.variable_domain), tuple(column.variable_domain)
             )
 
-    def add_column(
-        self, task_id: str, task_context: dict[str, Any] | None = None
-    ) -> CircuitColumn:
+    def add_column(self, task_id: str) -> CircuitColumn:
         """
         Add a column for a new task, connected to every earlier column.
 
         :param task_id: Identifier of the new task.
-        :param task_context: Metadata describing the new task.
         :return: The new column.
         :raises IncompatibleVariableDomainError: If :attr:`variable_domain` contains
             variables the template does not model.
@@ -233,7 +219,6 @@ class ProgressiveProbabilisticCircuit:
             task_id=task_id,
             root=mounted_units[template_copy.root.index],
             variable_domain=self.variable_domain,
-            task_context=task_context or {},
         )
         for earlier_column in self.columns:
             self._connect_to_earlier_column(column, earlier_column)
@@ -260,6 +245,24 @@ class ProgressiveProbabilisticCircuit:
         for aligned in aligned_sum_units:
             self.circuit.add_edge(aligned.left, aligned.right, log_weight=0.0)
             aligned.left.normalize()
+
+    def restrict_root_to(self, column: CircuitColumn) -> None:
+        """
+        Give the whole weight of :attr:`root` to one column, so the circuit models the
+        data by that column alone.
+
+        :param column: The column to give the weight to.
+        :raises UnregisteredColumnError: If the column does not belong to this
+            progressive circuit.
+        """
+        if column not in self.columns:
+            raise UnregisteredColumnError(column.task_id)
+        for other_column in self.columns:
+            self.circuit.add_edge(
+                self.root,
+                other_column.root,
+                log_weight=0.0 if other_column is column else -math.inf,
+            )
 
     def weight_root_by_sample_count(self) -> None:
         """
