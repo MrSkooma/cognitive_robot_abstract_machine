@@ -1,3 +1,7 @@
+"""
+The structure of a progressive probabilistic circuit: its columns and how they connect.
+"""
+
 from __future__ import annotations
 
 # %% imports
@@ -7,15 +11,9 @@ from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 
-from random_events.variable import Variable
-
-from probabilistic_model.exceptions import (
-    ChildCountMismatchError,
-    IncompatibleVariableDomainError,
-    ScopeMismatchError,
-    UnitTypeMismatchError,
+from probabilistic_model.learning.progressive.exceptions import (
+    ColumnStructureMismatchError,
     UnregisteredColumnError,
-    UnsupportedVariableDomainChangeError,
 )
 from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import (
     ProbabilisticCircuit,
@@ -36,22 +34,14 @@ class CircuitColumn:
         edges from it to other columns exist.
     """
 
-    task_id: str
+    task_name: str
     """
-    Identifier of the task.
+    Readable name of the task.
     """
 
     root: Unit
     """
     Root unit of the column.
-    """
-
-    variable_domain: tuple[Variable, ...] | None = None
-    """
-    Variables of the task, a subset of the variables of :attr:`root`; defaults to all of
-    them.
-
-    The column itself always models every variable of :attr:`root`.
     """
 
     unit_indices: frozenset[int] = field(init=False)
@@ -61,38 +51,33 @@ class CircuitColumn:
 
     sample_count: int = field(default=0, init=False)
     """
-    Number of rows the column was learned from, summed over every call of :meth:`~probab
-    ilistic_model.learning.progressive.ProgressiveExpectationMaximization.learn`.
+    Number of rows the column was last learned from;
+    :attr:`ProgressiveProbabilisticCircuit.root` weights the column by its share of
+    these rows.
     """
 
     def __post_init__(self):
-        if self.variable_domain is None:
-            self.variable_domain = tuple(self.root.variables)
-        self.validate_variable_domain()
+        """
+        Record the units the column owns: its root and every unit below it.
+        """
         descendants = self.root.probabilistic_circuit.descendants(self.root)
         self.unit_indices = frozenset(
             [self.root.index] + [unit.index for unit in descendants]
         )
 
-    def validate_variable_domain(self) -> None:
-        """
-        :raises IncompatibleVariableDomainError: If :attr:`variable_domain` contains
-            variables :attr:`root` does not model.
-        """
-        available_variables = tuple(self.root.variables)
-        if not set(self.variable_domain).issubset(available_variables):
-            raise IncompatibleVariableDomainError(
-                tuple(self.variable_domain), available_variables
-            )
-
     def contains(self, unit: Unit) -> bool:
         """
+        Check whether a unit belongs to the column.
+
+        :param unit: The unit to check.
         :return: Whether the column owns the unit.
         """
         return unit.index in self.unit_indices
 
     def children_of(self, unit: Unit) -> list[Unit]:
         """
+        Get the children of a unit inside the column.
+
         :param unit: A unit the column owns.
         :return: The children of the unit that the column owns, without those in other
             columns.
@@ -117,6 +102,16 @@ class AlignedUnits:
     The unit of the second column.
     """
 
+    def match(self) -> bool:
+        """
+        Check whether the two units have the same structure.
+
+        :return: Whether both units have the same type and model the same variables.
+        """
+        return type(self.left) is type(self.right) and tuple(
+            self.left.variables
+        ) == tuple(self.right.variables)
+
 
 # %% progressive probabilistic circuit
 @dataclass
@@ -135,12 +130,11 @@ class ProgressiveProbabilisticCircuit:
     Circuit every column is copied from, structure and initial parameters.
     """
 
-    variable_domain: tuple[Variable, ...] | None = None
+    earlier_column_share: float = 0.5
     """
-    Variables of the tasks, a subset of the variables of :attr:`template`; defaults to
-    all of them.
-
-    Every column still models every variable of :attr:`template`.
+    Share of the start weight of every sum unit of a new column that goes to the aligned
+    sum units of the earlier columns, split equally among them; the column's own
+    children keep the rest in the proportions of :attr:`template`.
     """
 
     columns: list[CircuitColumn] = field(default_factory=list, init=False)
@@ -159,97 +153,109 @@ class ProgressiveProbabilisticCircuit:
     """
 
     def __post_init__(self):
-        if self.variable_domain is None:
-            self.variable_domain = tuple(self.template.variables)
-        self.validate_variable_domain()
+        """
+        Create the empty circuit and its root, which the columns are added below.
+        """
         self.circuit = ProbabilisticCircuit()
         self.root = SumUnit(probabilistic_circuit=self.circuit)
 
-    def validate_variable_domain(self) -> None:
-        """
-        :raises IncompatibleVariableDomainError: If :attr:`variable_domain` contains
-            variables :attr:`template` does not model.
-        :raises UnsupportedVariableDomainChangeError: If :attr:`variable_domain` changed
-            after columns were created.
-        """
-        available_variables = tuple(self.template.variables)
-        if not set(self.variable_domain).issubset(available_variables):
-            raise IncompatibleVariableDomainError(
-                tuple(self.variable_domain), available_variables
-            )
-        for column in self.columns:
-            if set(column.variable_domain) != set(self.variable_domain):
-                raise UnsupportedVariableDomainChangeError(
-                    tuple(column.variable_domain), tuple(self.variable_domain)
-                )
-
     def validate_column(self, column: CircuitColumn) -> None:
         """
+        Check that a column was added to this progressive circuit.
+
+        :param column: The column to check.
         :raises UnregisteredColumnError: If the column belongs to another progressive
             circuit.
-        :raises IncompatibleVariableDomainError: If the variable domain of the column
-            contains variables its root does not model.
-        :raises UnsupportedVariableDomainChangeError: If the variable domain of the
-            column differs from :attr:`variable_domain`.
         """
         if column not in self.columns:
-            raise UnregisteredColumnError(column.task_id)
-        column.validate_variable_domain()
-        if set(column.variable_domain) != set(self.variable_domain):
-            raise UnsupportedVariableDomainChangeError(
-                tuple(self.variable_domain), tuple(column.variable_domain)
-            )
+            raise UnregisteredColumnError(column)
 
-    def add_column(self, task_id: str) -> CircuitColumn:
+    def add_column(self, task_name: str) -> CircuitColumn:
         """
         Add a column for a new task, connected to every earlier column.
 
+        Every sum unit of the new column also mixes the aligned sum unit of each earlier
+        column, starting with :attr:`earlier_column_share` of its weight. The circuit
+        stays unchanged if the template no longer matches the earlier columns.
+
+        :param task_name: Readable name of the task.
         :return: The new column.
-        :raises IncompatibleVariableDomainError: If :attr:`variable_domain` contains
-            variables the template does not model.
-        :raises UnsupportedVariableDomainChangeError: If :attr:`variable_domain` changed
-            after columns were created.
+        :raises ColumnStructureMismatchError: If the template differs in structure from
+            the earlier columns.
         """
-        self.validate_variable_domain()
         template_copy = copy.deepcopy(self.template)
+        aligned_sum_units = self._aligned_sum_units(
+            CircuitColumn(task_name=task_name, root=template_copy.root)
+        )
         mounted_units = self.circuit.mount(template_copy.root)
         column = CircuitColumn(
-            task_id=task_id,
-            root=mounted_units[template_copy.root.index],
-            variable_domain=self.variable_domain,
+            task_name=task_name, root=mounted_units[template_copy.root.index]
         )
-        for earlier_column in self.columns:
-            self._connect_to_earlier_column(column, earlier_column)
+        self._connect_to_earlier_columns(
+            [
+                AlignedUnits(mounted_units[aligned.left.index], aligned.right)
+                for aligned in aligned_sum_units
+            ]
+        )
         self.columns.append(column)
         self.root.add_subcircuit(column.root, log_weight=0.0)
-        self.root.normalize()
+        self.weight_root_by_sample_count()
         return column
 
-    def _connect_to_earlier_column(
-        self, column: CircuitColumn, earlier_column: CircuitColumn
+    def _connect_to_earlier_columns(
+        self, aligned_sum_units: list[AlignedUnits]
     ) -> None:
         """
-        Make every sum unit of ``earlier_column`` a child of the aligned sum unit of
-        ``column``.
+        Make every earlier sum unit a child of its aligned sum unit of the new column,
+        with :attr:`earlier_column_share` of the start weight split equally among the
+        earlier columns.
+
+        :param aligned_sum_units: The sum units of the new column, already in the
+            circuit, paired with the aligned sum unit of each earlier column.
         """
-        aligned_sum_units = [
+        if not aligned_sum_units:
+            return
+        own_log_share = math.log(1 - self.earlier_column_share)
+        for sum_unit in {aligned.left for aligned in aligned_sum_units}:
+            sum_unit.normalize()
+            for log_weight, child in sum_unit.log_weighted_subcircuits:
+                self.circuit.add_edge(
+                    sum_unit, child, log_weight=log_weight + own_log_share
+                )
+        earlier_column_log_weight = math.log(
+            self.earlier_column_share / len(self.columns)
+        )
+        for aligned in aligned_sum_units:
+            self.circuit.add_edge(
+                aligned.left, aligned.right, log_weight=earlier_column_log_weight
+            )
+
+    def _aligned_sum_units(self, column: CircuitColumn) -> list[AlignedUnits]:
+        """
+        Pair every sum unit of a column with the aligned sum unit of each earlier
+        column, earliest column first.
+
+        :param column: A column that is not part of the circuit yet.
+        :return: The pairs, the unit of ``column`` on the left.
+        :raises ColumnStructureMismatchError: If the column differs in structure from an
+            earlier column.
+        """
+        return [
             aligned
+            for earlier_column in self.columns
             for aligned in self.aligned_units(column, earlier_column)
             if isinstance(aligned.left, SumUnit)
         ]
-        for aligned in aligned_sum_units:
-            self.circuit.add_edge(aligned.left, aligned.right, log_weight=0.0)
-            aligned.left.normalize()
 
     def restrict_root_to(self, column: CircuitColumn) -> None:
         """
         Give the whole weight of :attr:`root` to one column.
 
+        :param column: The column that gets the whole weight.
         :raises UnregisteredColumnError: If the column belongs to another progressive
             circuit.
         """
-        if column not in self.columns:
-            raise UnregisteredColumnError(column.task_id)
+        self.validate_column(column)
         for other_column in self.columns:
             self.circuit.add_edge(
                 self.root,
@@ -260,10 +266,15 @@ class ProgressiveProbabilisticCircuit:
     def weight_root_by_sample_count(self) -> None:
         """
         Weight every column below :attr:`root` by its share of all rows the columns were
-        learned from; nothing changes before any column was learned.
+        learned from, so columns that were not learned get no weight.
+
+        Before any column was learned, every column gets the same weight.
         """
         total_sample_count = sum(column.sample_count for column in self.columns)
         if total_sample_count == 0:
+            for column in self.columns:
+                self.circuit.add_edge(self.root, column.root, log_weight=0.0)
+            self.root.normalize()
             return
         for column in self.columns:
             log_weight = (
@@ -279,8 +290,10 @@ class ProgressiveProbabilisticCircuit:
         """
         Walk two columns in parallel, without following edges between columns.
 
+        :param left: The first column.
+        :param right: The second column.
         :return: The units at matching positions, starting with the roots.
-        :raises ColumnsDivergedError: If the columns differ in structure.
+        :raises ColumnStructureMismatchError: If the columns differ in structure.
         """
         queue: deque[AlignedUnits] = deque([AlignedUnits(left.root, right.root)])
         visited: set[AlignedUnits] = set()
@@ -289,20 +302,11 @@ class ProgressiveProbabilisticCircuit:
             if aligned in visited:
                 continue
             visited.add(aligned)
-            if type(aligned.left) is not type(aligned.right):
-                raise UnitTypeMismatchError(aligned.left, aligned.right)
-            if tuple(aligned.left.variables) != tuple(aligned.right.variables):
-                raise ScopeMismatchError(aligned.left, aligned.right)
-            yield aligned
             left_children = left.children_of(aligned.left)
             right_children = right.children_of(aligned.right)
-            if len(left_children) != len(right_children):
-                raise ChildCountMismatchError(
-                    aligned.left,
-                    aligned.right,
-                    len(left_children),
-                    len(right_children),
-                )
+            if not aligned.match() or len(left_children) != len(right_children):
+                raise ColumnStructureMismatchError(aligned.left, aligned.right)
+            yield aligned
             queue.extend(
                 AlignedUnits(left_child, right_child)
                 for left_child, right_child in zip(left_children, right_children)
@@ -310,6 +314,9 @@ class ProgressiveProbabilisticCircuit:
 
     def units_of(self, column: CircuitColumn) -> set[Unit]:
         """
+        Get the units of a column from the circuit.
+
+        :param column: A column of this progressive circuit.
         :return: The units the column owns.
         """
         return {self.circuit.graph[index] for index in column.unit_indices}

@@ -29,6 +29,7 @@ new task
 2. makes the sum unit at the same position in every earlier column an additional child
    of each sum unit of the new column, and
 3. adds the new column below the root of the PPC, a sum unit that mixes all columns.
+   The new column gets no weight there until it is learned.
 
 Edges only point from newer columns to older ones, so an earlier column never depends on
 a later one. Aligned sum units model the same variables, so the PPC stays smooth and
@@ -37,11 +38,11 @@ earlier columns can model the same rows.
 
 Columns align because they are copies of the same template. If the template is changed
 after columns were added, the new column no longer matches the earlier ones, and adding
-it raises a {py:class}`~probabilistic_model.exceptions.ColumnsDivergedError`.
+it raises a {py:class}`~probabilistic_model.learning.progressive.exceptions.ColumnStructureMismatchError`.
 
 ## Learning
 
-{py:class}`~probabilistic_model.learning.progressive.ProgressiveExpectationMaximization`
+{py:class}`~probabilistic_model.learning.progressive.expectation_maximization.ProgressiveExpectationMaximization`
 learns one column at a time with expectation maximization:
 
 - While a column is learned, the root gives it the whole weight, so it is trained as the
@@ -52,7 +53,7 @@ learns one column at a time with expectation maximization:
   learned from.
 
 Gaussian, discrete and symbolic leaves can be learned; any other leaf raises an
-{py:class}`~probabilistic_model.exceptions.UnsupportedLeafDistributionError`.
+{py:class}`~probabilistic_model.learning.progressive.exceptions.UnsupportedLeafDistributionError`.
 
 ```{warning}
 Later columns read from earlier ones, so learning an earlier column again also changes
