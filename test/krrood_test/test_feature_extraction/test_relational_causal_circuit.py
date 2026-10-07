@@ -9,11 +9,13 @@ import numpy as np
 import pytest
 
 from krrood.entity_query_language.factories import variable
-from krrood.ormatic.data_access_objects.helper import to_dao
 from probabilistic_model.probabilistic_circuit.causal.causal_circuit import (
     CausalCircuit,
 )
 from probabilistic_model.learning.jpt.jpt import JointProbabilityTree
+from probabilistic_model.probabilistic_circuit.causal.exceptions import (
+    SupportDeterminismVerificationResult,
+)
 from probabilistic_model.learning.learning_method import StratifiedLearning
 from probabilistic_model.probabilistic_circuit.relational.causal import (
     RelationalCausalCircuit,
@@ -289,9 +291,11 @@ def test_fit_stratifies_the_class_circuit_by_the_given_variable(many_chair_count
     chair_count_variable = variable(SceneRoomAggregations).chair_count()
     model = RelationalProbabilisticCircuit(
         SceneRoom,
-        learning_method=StratifiedLearning(variables=[chair_count_variable._name_], method=JointProbabilityTree()),
+        learning_method=StratifiedLearning(
+            variables=[chair_count_variable._name_], method=JointProbabilityTree()
+        ),
     )
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
     resolved_chair_count = next(
         v
         for v in model.class_probabilistic_circuit.variables
@@ -328,10 +332,12 @@ def test_verify_support_determinism_survives_a_stratified_partitions_own_further
     chair_count_variable = variable(SceneRoomAggregations).chair_count()
     model = RelationalProbabilisticCircuit(
         SceneRoom,
-        learning_method=StratifiedLearning(variables=[chair_count_variable._name_], method=JointProbabilityTree()),
+        learning_method=StratifiedLearning(
+            variables=[chair_count_variable._name_], method=JointProbabilityTree()
+        ),
     )
     relational_causal_circuit = RelationalCausalCircuit()
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
 
     np.random.seed(0)
     grounded = model.ground(correlated_room_query, grounding_mode=GroundingMode.SAMPLED)
@@ -379,7 +385,7 @@ def test_fit_stratifies_the_class_circuit_by_every_given_variable(
             method=JointProbabilityTree(),
         ),
     )
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
     joint_values = {
         (
             SceneRoomAggregations(instance=room).chair_count(),
@@ -400,10 +406,16 @@ def test_fit_stratifies_an_exchangeable_parts_template_by_the_given_variable(
     chair_count_variable = variable(SceneRoomAggregations).chair_count()
     model = RelationalProbabilisticCircuit(
         SceneRoom,
-        learning_method=StratifiedLearning(variables=[chair_count_variable._name_], method=JointProbabilityTree()),
-        part_learning_methods={"objects": StratifiedLearning(variables=["type"], method=JointProbabilityTree())},
+        learning_method=StratifiedLearning(
+            variables=[chair_count_variable._name_], method=JointProbabilityTree()
+        ),
+        part_learning_methods={
+            "objects": StratifiedLearning(
+                variables=["type"], method=JointProbabilityTree()
+            )
+        },
     )
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
     object_types = {
         scene_object.type
         for room in many_chair_count_rooms
@@ -437,7 +449,7 @@ def test_plain_fit_honours_the_minimum_samples_per_leaf(many_chair_count_rooms):
             min_samples_per_leaf=len(many_chair_count_rooms)
         ),
     )
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
 
     assert _tree_leaf_count(model.class_probabilistic_circuit.root) == 1
 
@@ -455,7 +467,7 @@ def test_stratified_fit_honours_the_minimum_samples_per_leaf(many_chair_count_ro
             method=JointProbabilityTree(min_samples_per_leaf=20),
         ),
     )
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
 
     partitions = model.class_probabilistic_circuit.root.subcircuits
     assert [_tree_leaf_count(partition) for partition in partitions] == [1, 1]
@@ -471,7 +483,7 @@ def test_minimum_samples_per_leaf_reaches_an_exchangeable_parts_template(
             "objects": JointProbabilityTree(min_samples_per_leaf=object_count)
         },
     )
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
 
     template_circuit = model.exchangeable_distribution_templates[
         "objects"
@@ -495,10 +507,12 @@ def test_sampled_grounding_gives_every_stratum_its_own_latent_value(
     model = RelationalProbabilisticCircuit(
         SceneRoom,
         monte_carlo_sample_count=1,
-        learning_method=StratifiedLearning(variables=[chair_count_variable._name_], method=JointProbabilityTree()),
+        learning_method=StratifiedLearning(
+            variables=[chair_count_variable._name_], method=JointProbabilityTree()
+        ),
     )
     relational_causal_circuit = RelationalCausalCircuit()
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(many_chair_count_rooms)
 
     np.random.seed(0)
     grounded = model.ground(correlated_room_query, grounding_mode=GroundingMode.SAMPLED)
@@ -525,14 +539,23 @@ def test_sampled_grounding_gives_every_stratum_its_own_latent_value(
         assert probability == pytest.approx(0.5, abs=0.01)
 
 
-def test_a_part_attribute_of_a_stratified_template_registers_as_a_cause(
-    many_chair_count_rooms, correlated_room_query
-):
+@pytest.fixture
+def rooms_with_every_object_type_in_every_partition():
     """
-    Regression test: grounding a part used to condition the template on the latents
-    through the simplifying conditional, which merged the template's own strata into one
-    sum whose children overlapped on the stratified attribute, so a part attribute could
-    never pass support-determinism verification as a cause.
+    Two chair-count partitions (20 rooms each) whose objects show both object types in
+    either partition, so the object template conditioned on either sampled count keeps
+    the same support on an object's type.
+    """
+    rng = np.random.default_rng(0)
+    return [_room_with_chair_count(rng, 1) for _ in range(20)] + [
+        _room_with_chair_count(rng, 2) for _ in range(20)
+    ]
+
+
+def _part_attribute_causal_circuit(rooms, correlated_room_query) -> CausalCircuit:
+    """
+    Register the first object's type as a cause of the room's x position on a model
+    whose object template is stratified by type.
     """
     model = RelationalProbabilisticCircuit(
         SceneRoom,
@@ -544,8 +567,7 @@ def test_a_part_attribute_of_a_stratified_template_registers_as_a_cause(
             )
         },
     )
-    relational_causal_circuit = RelationalCausalCircuit()
-    model.fit([to_dao(room) for room in many_chair_count_rooms])
+    model.fit(rooms)
 
     np.random.seed(0)
     grounded = model.ground(correlated_room_query, grounding_mode=GroundingMode.SAMPLED)
@@ -555,11 +577,40 @@ def test_a_part_attribute_of_a_stratified_template_registers_as_a_cause(
     position_variable = next(
         v for v in grounded.variables if v.name == "SceneRoom.position.x"
     )
-
-    causal_circuit = relational_causal_circuit.from_grounded_circuit(
+    return RelationalCausalCircuit().from_grounded_circuit(
         grounded,
         causal_variables=[object_type_variable],
         effect_variables=[position_variable],
         trim_to_registered_variables=True,
     )
+
+
+def test_a_part_attribute_of_a_stratified_template_registers_as_a_cause(
+    rooms_with_every_object_type_in_every_partition, correlated_room_query
+):
+    """
+    Regression test: grounding a part used to condition the template on the latents
+    through the simplifying conditional, which merged the template's own strata into one
+    sum whose children overlapped on the stratified attribute, so a part attribute could
+    never pass support-determinism verification as a cause.
+    """
+    causal_circuit = _part_attribute_causal_circuit(
+        rooms_with_every_object_type_in_every_partition, correlated_room_query
+    )
     assert isinstance(causal_circuit, CausalCircuit)
+
+
+def test_a_part_attribute_whose_support_depends_on_the_sampled_count_is_no_cause(
+    many_chair_count_rooms, correlated_room_query
+):
+    """
+    Grounding with the chair count left open mixes one copy of the object template per
+    sampled count.
+
+    Here every object of a three-chair room is a chair, so the copy for
+    that count supports only one type while the copy for one chair supports both: the
+    copies overlap on the type without coinciding, and there is no disjoint region of
+    the type to intervene on.
+    """
+    with pytest.raises(SupportDeterminismVerificationResult):
+        _part_attribute_causal_circuit(many_chair_count_rooms, correlated_room_query)

@@ -1,6 +1,10 @@
+from __future__ import annotations
+
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from datetime import timedelta
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -21,6 +25,9 @@ from krrood.symbolic_math.symbolic_math import FloatVariable
 from semantic_digital_twin.world_description.world_state_trajectory_plotter import (
     WorldStateTrajectoryPlotter,
 )
+
+if TYPE_CHECKING:
+    from semantic_digital_twin.adapters.multi_sim import MujocoSim
 
 
 @dataclass
@@ -118,6 +125,28 @@ class SimulationPacer(ScheduledPacer):
 
 
 @dataclass
+class SteppedSimulationPacer(Pacer):
+    """
+    Holds a loop by stepping a physically simulated world one cycle forward between two
+    ticks, so a controller ticking against the world runs in lockstep with its physics.
+
+    Every tick's command lands in the world state, the simulation's servos take it as
+    their set point, and the physics advances one cycle before the next tick reads the
+    world back.
+    """
+
+    simulation: MujocoSim
+    """
+    The simulation to step; it has to be started with
+    :meth:`~semantic_digital_twin.adapters.multi_sim.MujocoSim.start_stepped_simulation`
+    already.
+    """
+
+    def sleep(self) -> None:
+        self.simulation.step_simulation(timedelta(seconds=1 / self.target_frequency))
+
+
+@dataclass
 class Executor:
     """
     Represents the main execution entity that manages motion statecharts, collision
@@ -163,8 +192,11 @@ class Executor:
     """
 
     @property
-    def time(self) -> float:
-        return self.control_cycles * self.context.qp_controller_config.control_dt
+    def time(self) -> timedelta:
+        """
+        Simulated time of the control cycles executed since the last compile.
+        """
+        return self.control_cycles * self.context.qp_controller_config.control_time_step
 
     def __post_init__(self):
         self.pacer.target_frequency = self.context.qp_controller_config.target_frequency
@@ -197,12 +229,16 @@ class Executor:
         self._compiled_world_state_data = self.context.world.state._data
         self._compile_qp_controller(self.context.qp_controller_config)
         if self.trajectory_plotter is not None:
-            self.trajectory_plotter.reset(self.context.world.state, self.time)
+            self.trajectory_plotter.reset(
+                self.context.world.state, self.time.total_seconds()
+            )
         if self.debug_expression_plotter is not None:
             self.debug_expression_plotter.reset(
                 self.motion_statechart.collect_debug_expressions()
             )
-            self.debug_expression_plotter.debug_expression_trajectory.append(self.time)
+            self.debug_expression_plotter.debug_expression_trajectory.append(
+                self.time.total_seconds()
+            )
         self.context.collision_manager.update_collision_matrix()
         # do one tick to immediately active nodes whose start condition is constant true.
         self.motion_statechart.tick(self.context)
@@ -214,7 +250,9 @@ class Executor:
             self.context.collision_manager.compute_collisions()
         self.motion_statechart.tick(self.context)
         if self.debug_expression_plotter is not None:
-            self.debug_expression_plotter.debug_expression_trajectory.append(self.time)
+            self.debug_expression_plotter.debug_expression_trajectory.append(
+                self.time.total_seconds()
+            )
         if self.qp_controller is None:
             return
         next_cmd = self.qp_controller.compute_command(
@@ -224,12 +262,12 @@ class Executor:
         )
         self.context.world.apply_control_commands(
             next_cmd,
-            self.qp_controller.config.control_dt,
+            self.qp_controller.config.control_time_step.total_seconds(),
             self.qp_controller.config.max_derivative,
         )
         if self.trajectory_plotter is not None:
             self.trajectory_plotter.world_state_trajectory.append(
-                self.context.world.state, self.time
+                self.context.world.state, self.time.total_seconds()
             )
 
     def tick_until_end(self, timeout: int = 1_000):
