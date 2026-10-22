@@ -27,6 +27,7 @@ from probabilistic_model.learning.progressive.expectation_maximization import (
 from probabilistic_model.learning.progressive.progressive_circuit import (
     AlignedUnits,
     CircuitColumn,
+    EarlierColumnTarget,
     ProgressiveProbabilisticCircuit,
 )
 from probabilistic_model.probabilistic_circuit.rx.helper import fully_factorized
@@ -35,6 +36,7 @@ from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import (
     ProbabilisticCircuit,
     ProductUnit,
     SumUnit,
+    Unit,
     leaf,
 )
 from probabilistic_model.utils import MissingDict
@@ -330,6 +332,465 @@ def test_add_column_rejects_changed_template_before_changing_circuit():
 
     assert graph.num_nodes() == unit_count_before
     assert graph.num_edges() == edge_count_before
+
+
+# %% children of aligned sum units as target in earlier columns
+def _make_children_target_circuit(
+    template: ProbabilisticCircuit,
+) -> ProgressiveProbabilisticCircuit:
+    """
+    A progressive circuit whose new columns read from the children of the aligned sum
+    units of earlier columns.
+    """
+    return ProgressiveProbabilisticCircuit(
+        template=template,
+        earlier_column_target=EarlierColumnTarget.CHILDREN_OF_ALIGNED_SUM_UNIT,
+    )
+
+
+def _learned_column(
+    progressive_circuit: ProgressiveProbabilisticCircuit, task_name: str, seed: int
+) -> CircuitColumn:
+    """
+    A new column learned on two clusters of different size, so its sum units end up with
+    unequal weights.
+    """
+    column = progressive_circuit.add_column(task_name=task_name)
+    random = np.random.default_rng(seed)
+    data = np.concatenate(
+        [
+            random.normal(loc=-3.0, scale=0.5, size=(80, 2)),
+            random.normal(loc=3.0, scale=0.5, size=(20, 2)),
+        ]
+    )
+    ProgressiveExpectationMaximization(progressive_circuit).learn(
+        data, column, iterations=5
+    )
+    return column
+
+
+def _weight_on(sum_unit: SumUnit, children: list[Unit]) -> float:
+    """
+    The total weight a sum unit gives to some of its children.
+    """
+    child_indices = {child.index for child in children}
+    return float(
+        np.sum(
+            [
+                np.exp(log_weight)
+                for log_weight, child in sum_unit.log_weighted_subcircuits
+                if child.index in child_indices
+            ]
+        )
+    )
+
+
+def test_progressive_circuit_targets_aligned_sum_unit_by_default():
+    progressive_circuit = ProgressiveProbabilisticCircuit(
+        template=_make_mixture_template("x", "y")
+    )
+
+    assert (
+        progressive_circuit.earlier_column_target
+        is EarlierColumnTarget.ALIGNED_SUM_UNIT
+    )
+
+
+def test_new_column_reads_from_children_of_aligned_sum_unit():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    earlier_column = progressive_circuit.add_column(task_name="task-a")
+
+    column = progressive_circuit.add_column(task_name="task-b")
+
+    assert not progressive_circuit.circuit.has_edge(column.root, earlier_column.root)
+    for earlier_child in earlier_column.root.subcircuits:
+        assert progressive_circuit.circuit.has_edge(column.root, earlier_child)
+    assert column.root.is_normalized()
+
+
+def test_new_column_reads_from_own_children_of_every_earlier_column():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    earlier_columns = [
+        progressive_circuit.add_column(task_name="task-a"),
+        progressive_circuit.add_column(task_name="task-b"),
+    ]
+
+    column = progressive_circuit.add_column(task_name="task-c")
+
+    expected_children = set(column.children_of(column.root))
+    for earlier_column in earlier_columns:
+        expected_children.update(earlier_column.children_of(earlier_column.root))
+    assert set(column.root.subcircuits) == expected_children
+
+
+def test_new_column_splits_start_weight_of_earlier_column_like_its_aligned_sum_unit():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    earlier_columns = [
+        _learned_column(progressive_circuit, task_name="task-a", seed=0),
+        _learned_column(progressive_circuit, task_name="task-b", seed=1),
+    ]
+
+    column = progressive_circuit.add_column(task_name="task-c")
+
+    share = progressive_circuit.earlier_column_share
+    graph = progressive_circuit.circuit.graph
+    for earlier_column in earlier_columns:
+        own_children = earlier_column.children_of(earlier_column.root)
+        own_weights = np.exp(
+            [
+                graph.get_edge_data(earlier_column.root.index, child.index)
+                for child in own_children
+            ]
+        )
+        start_weights = np.exp(
+            [
+                graph.get_edge_data(column.root.index, child.index)
+                for child in own_children
+            ]
+        )
+        np.testing.assert_allclose(
+            start_weights,
+            share / len(earlier_columns) * own_weights / own_weights.sum(),
+        )
+
+
+def test_new_column_starts_with_distribution_of_aligned_sum_unit_target():
+    data = np.random.default_rng(2).normal(size=(30, 2))
+    start_log_likelihoods = []
+    for earlier_column_target in EarlierColumnTarget:
+        progressive_circuit = ProgressiveProbabilisticCircuit(
+            template=_make_mixture_template("x", "y"),
+            earlier_column_target=earlier_column_target,
+        )
+        _learned_column(progressive_circuit, task_name="task-a", seed=0)
+        column = progressive_circuit.add_column(task_name="task-b")
+        start_log_likelihoods.append(
+            _column_log_likelihood(progressive_circuit, column, data)
+        )
+
+    np.testing.assert_allclose(*start_log_likelihoods)
+
+
+def test_every_sum_unit_of_smooth_nested_column_reads_from_children_of_aligned_sum_unit():
+    progressive_circuit = _make_children_target_circuit(_make_smooth_nested_layout())
+    earlier_column = progressive_circuit.add_column(task_name="task-a")
+
+    column = progressive_circuit.add_column(task_name="task-b")
+
+    aligned_sum_units = [
+        aligned
+        for aligned in progressive_circuit.aligned_units(column, earlier_column)
+        if isinstance(aligned.left, SumUnit)
+    ]
+    assert len(aligned_sum_units) == 3
+    for aligned in aligned_sum_units:
+        assert not progressive_circuit.circuit.has_edge(aligned.left, aligned.right)
+        for earlier_child in earlier_column.children_of(aligned.right):
+            assert progressive_circuit.circuit.has_edge(aligned.left, earlier_child)
+        assert aligned.left.is_normalized()
+
+
+def test_learning_column_reading_children_leaves_earlier_column_unchanged():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    learner = ProgressiveExpectationMaximization(progressive_circuit)
+    random = np.random.default_rng(0)
+    earlier_data = random.normal(loc=0.0, scale=1.0, size=(50, 2))
+    earlier_column = progressive_circuit.add_column(task_name="task-a")
+    learner.learn(earlier_data, earlier_column, iterations=3)
+    likelihood_before = _column_log_likelihood(
+        progressive_circuit, earlier_column, earlier_data
+    )
+    weights_before = _sum_unit_weights(progressive_circuit, earlier_column)
+
+    column = progressive_circuit.add_column(task_name="task-b")
+    learner.learn(
+        random.normal(loc=10.0, scale=0.2, size=(50, 2)), column, iterations=3
+    )
+
+    np.testing.assert_array_equal(
+        _column_log_likelihood(progressive_circuit, earlier_column, earlier_data),
+        likelihood_before,
+    )
+    assert _sum_unit_weights(progressive_circuit, earlier_column) == weights_before
+
+
+def test_learning_column_reading_children_reuses_earlier_children_that_explain_data():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    learner = ProgressiveExpectationMaximization(progressive_circuit)
+    data = np.random.default_rng(0).normal(loc=5.0, scale=0.5, size=(100, 2))
+    earlier_column = progressive_circuit.add_column(task_name="task-a")
+    learner.learn(data, earlier_column, iterations=5)
+    column = progressive_circuit.add_column(task_name="task-b")
+    earlier_children = earlier_column.children_of(earlier_column.root)
+    weight_before = _weight_on(column.root, earlier_children)
+
+    learner.learn(data, column, iterations=1)
+
+    assert _weight_on(column.root, earlier_children) > weight_before
+
+
+# %% edge cases of children of aligned sum units as target
+def _give_no_weight_to(sum_unit: SumUnit, children: list[Unit]) -> None:
+    """
+    Set the weight of some children of a sum unit to zero and renormalize it.
+    """
+    for child in children:
+        sum_unit.probabilistic_circuit.add_edge(sum_unit, child, log_weight=-np.inf)
+    sum_unit.normalize()
+
+
+def _make_leaf_mixture_template(variable_name: str) -> ProbabilisticCircuit:
+    """
+    A uniform mixture of two Gaussian leaves over one variable.
+    """
+    circuit = ProbabilisticCircuit()
+    sum_root = SumUnit(probabilistic_circuit=circuit)
+    variable = Continuous(variable_name)
+    for location in [-2.0, 2.0]:
+        sum_root.add_subcircuit(
+            leaf(
+                GaussianDistribution(variable=variable, location=location, scale=1.0),
+                circuit,
+            ),
+            log_weight=0.0,
+        )
+    sum_root.normalize()
+    return circuit
+
+
+def _make_mixture_of_mixtures_template(*variable_names: str) -> ProbabilisticCircuit:
+    """
+    A uniform mixture whose children are two mixture templates.
+    """
+    circuit = ProbabilisticCircuit()
+    sum_root = SumUnit(probabilistic_circuit=circuit)
+    for _ in range(2):
+        mixture = _make_mixture_template(*variable_names)
+        mounted_units = circuit.mount(mixture.root)
+        sum_root.add_subcircuit(mounted_units[mixture.root.index], log_weight=0.0)
+    sum_root.normalize()
+    return circuit
+
+
+def _make_shared_children_template(*variable_names: str) -> ProbabilisticCircuit:
+    """
+    A uniform mixture of two sum units that mix the same two factorized products.
+    """
+    circuit = ProbabilisticCircuit()
+    sum_root = SumUnit(probabilistic_circuit=circuit)
+    products = []
+    for _ in range(2):
+        component = _make_factorized_template(*variable_names)
+        mounted_units = circuit.mount(component.root)
+        products.append(mounted_units[component.root.index])
+    for _ in range(2):
+        inner_sum = SumUnit(probabilistic_circuit=circuit)
+        for product in products:
+            inner_sum.add_subcircuit(product, log_weight=0.0)
+        inner_sum.normalize()
+        sum_root.add_subcircuit(inner_sum, log_weight=0.0)
+    sum_root.normalize()
+    return circuit
+
+
+def _assert_every_sum_unit_reads_from_children_of_aligned_sum_units(
+    progressive_circuit: ProgressiveProbabilisticCircuit,
+) -> None:
+    """
+    Assert that every sum unit of every later column has an edge to each child its
+    aligned sum unit has inside every earlier column, and is normalized.
+    """
+    for column_index, column in enumerate(progressive_circuit.columns):
+        for earlier_column in progressive_circuit.columns[:column_index]:
+            for aligned in progressive_circuit.aligned_units(column, earlier_column):
+                if not isinstance(aligned.left, SumUnit):
+                    continue
+                assert aligned.left.is_normalized()
+                for earlier_child in earlier_column.children_of(aligned.right):
+                    assert progressive_circuit.circuit.has_edge(
+                        aligned.left, earlier_child
+                    )
+
+
+def test_new_column_splits_earlier_share_equally_when_aligned_sum_unit_has_no_own_weight():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    progressive_circuit.add_column(task_name="task-a")
+    earlier_column = progressive_circuit.add_column(task_name="task-b")
+    own_children = earlier_column.children_of(earlier_column.root)
+    _give_no_weight_to(earlier_column.root, own_children)
+
+    column = progressive_circuit.add_column(task_name="task-c")
+
+    earlier_column_count = len(progressive_circuit.columns) - 1
+    graph = progressive_circuit.circuit.graph
+    for child in own_children:
+        assert np.exp(
+            graph.get_edge_data(column.root.index, child.index)
+        ) == pytest.approx(
+            progressive_circuit.earlier_column_share
+            / earlier_column_count
+            / len(own_children)
+        )
+    assert column.root.is_normalized()
+
+
+def test_new_column_gives_no_start_weight_to_earlier_child_without_weight():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    earlier_column = progressive_circuit.add_column(task_name="task-a")
+    unweighted_child, weighted_child = earlier_column.children_of(earlier_column.root)
+    _give_no_weight_to(earlier_column.root, [unweighted_child])
+
+    column = progressive_circuit.add_column(task_name="task-b")
+
+    graph = progressive_circuit.circuit.graph
+    assert graph.get_edge_data(column.root.index, unweighted_child.index) == -np.inf
+    assert np.exp(
+        graph.get_edge_data(column.root.index, weighted_child.index)
+    ) == pytest.approx(progressive_circuit.earlier_column_share)
+    assert column.root.is_normalized()
+
+
+def test_learning_column_with_unweighted_earlier_child_keeps_likelihood_finite():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    earlier_column = progressive_circuit.add_column(task_name="task-a")
+    _give_no_weight_to(
+        earlier_column.root, earlier_column.children_of(earlier_column.root)[:1]
+    )
+    column = progressive_circuit.add_column(task_name="task-b")
+    data = np.random.default_rng(0).normal(size=(50, 2))
+
+    history = ProgressiveExpectationMaximization(progressive_circuit).learn(
+        data, column, iterations=3
+    )
+
+    assert np.all(np.isfinite(history))
+    assert np.all(
+        np.isfinite(_column_log_likelihood(progressive_circuit, column, data))
+    )
+
+
+def test_column_without_sum_units_reading_children_has_no_edges_to_earlier_columns():
+    progressive_circuit = _make_children_target_circuit(
+        _make_factorized_template("x", "y")
+    )
+    progressive_circuit.add_column(task_name="task-a")
+
+    column = progressive_circuit.add_column(task_name="task-b")
+
+    for unit in progressive_circuit.units_of(column):
+        assert all(column.contains(child) for child in unit.subcircuits)
+
+
+def test_new_column_reads_from_earlier_leaves_below_aligned_sum_unit():
+    progressive_circuit = _make_children_target_circuit(
+        _make_leaf_mixture_template("x")
+    )
+    earlier_column = progressive_circuit.add_column(task_name="task-a")
+
+    column = progressive_circuit.add_column(task_name="task-b")
+
+    assert set(column.root.subcircuits) == set(column.children_of(column.root)) | set(
+        earlier_column.children_of(earlier_column.root)
+    )
+    assert column.root.is_normalized()
+
+
+def test_every_sum_unit_of_mixture_of_mixtures_reads_from_children_of_aligned_sum_units():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_of_mixtures_template("x", "y")
+    )
+
+    for task_name in ["task-a", "task-b", "task-c"]:
+        progressive_circuit.add_column(task_name=task_name)
+
+    _assert_every_sum_unit_reads_from_children_of_aligned_sum_units(progressive_circuit)
+
+
+def test_every_sum_unit_reads_from_earlier_children_shared_by_two_sum_units():
+    progressive_circuit = _make_children_target_circuit(
+        _make_shared_children_template("x", "y")
+    )
+
+    for task_name in ["task-a", "task-b", "task-c"]:
+        progressive_circuit.add_column(task_name=task_name)
+
+    _assert_every_sum_unit_reads_from_children_of_aligned_sum_units(progressive_circuit)
+
+
+def test_new_column_reading_children_without_earlier_column_share_is_independent():
+    progressive_circuit = ProgressiveProbabilisticCircuit(
+        template=_make_mixture_template("x", "y"),
+        earlier_column_share=0.0,
+        earlier_column_target=EarlierColumnTarget.CHILDREN_OF_ALIGNED_SUM_UNIT,
+    )
+    progressive_circuit.add_column(task_name="task-a")
+
+    column = progressive_circuit.add_column(task_name="task-b")
+
+    assert set(column.root.subcircuits) == set(column.children_of(column.root))
+    assert [
+        float(log_weight) for log_weight, _ in column.root.log_weighted_subcircuits
+    ] == pytest.approx(
+        [
+            float(log_weight)
+            for log_weight, _ in progressive_circuit.template.root.log_weighted_subcircuits
+        ]
+    )
+
+
+def test_add_column_reading_children_rejects_changed_template_before_changing_circuit():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_template("x", "y")
+    )
+    progressive_circuit.add_column(task_name="task-a")
+    extra_component = _make_factorized_template("x", "y")
+    template = progressive_circuit.template
+    template_root = template.root
+    mounted_units = template.mount(extra_component.root)
+    template_root.add_subcircuit(
+        mounted_units[extra_component.root.index], log_weight=0.0
+    )
+    graph = progressive_circuit.circuit.graph
+    unit_count_before = graph.num_nodes()
+    edge_count_before = graph.num_edges()
+
+    with pytest.raises(ColumnStructureMismatchError):
+        progressive_circuit.add_column(task_name="task-b")
+
+    assert graph.num_nodes() == unit_count_before
+    assert graph.num_edges() == edge_count_before
+
+
+def test_learning_columns_reading_children_never_decreases_train_likelihood():
+    progressive_circuit = _make_children_target_circuit(
+        _make_mixture_of_mixtures_template("x", "y")
+    )
+    learner = ProgressiveExpectationMaximization(progressive_circuit)
+    random = np.random.default_rng(0)
+
+    for location in [0.0, 3.0, 1.5]:
+        column = progressive_circuit.add_column(task_name=f"task-{location}")
+        history = learner.learn(
+            random.normal(loc=location, size=(60, 2)), column, iterations=10
+        )
+
+        assert np.all(np.diff(history) >= -1e-9)
 
 
 # %% aligned units
@@ -835,6 +1296,29 @@ def _make_split_layout() -> ProbabilisticCircuit:
     return circuit
 
 
+def _make_smooth_nested_layout() -> ProbabilisticCircuit:
+    """
+    A smooth mixture-of-mixtures: every outer branch nests its own indicator mixture
+    over the same inner variables.
+    """
+    circuit = ProbabilisticCircuit()
+    top_branch = _make_indicator_variable("smooth_top", branch_count=2)
+    outer_variables = [
+        Continuous(f"smooth_x{variable_index}") for variable_index in range(2)
+    ]
+    inner_branch = _make_indicator_variable("smooth_inner", branch_count=3)
+    inner_variables = [
+        Continuous(f"smooth_y{variable_index}") for variable_index in range(2)
+    ]
+    outer_mixture = _make_indicator_mixture(top_branch, outer_variables)
+    mounted_units = circuit.mount(outer_mixture.root)
+    for product in mounted_units[outer_mixture.root.index].subcircuits:
+        inner_mixture = _make_indicator_mixture(inner_branch, inner_variables)
+        inner_units = circuit.mount(inner_mixture.root)
+        product.add_subcircuit(inner_units[inner_mixture.root.index])
+    return circuit
+
+
 def _any_sum_unit(
     progressive_circuit: ProgressiveProbabilisticCircuit, column: CircuitColumn
 ) -> SumUnit:
@@ -880,3 +1364,17 @@ def test_edges_between_columns_preserve_decomposability_but_break_determinism(
     )
     assert oldest_sum_unit.is_deterministic()
     assert not newest_sum_unit.is_deterministic()
+
+
+@pytest.mark.parametrize(
+    "make_layout",
+    [_make_wide_layout, _make_smooth_nested_layout, _make_split_layout],
+    ids=["wide", "smooth-nested", "split"],
+)
+def test_edges_to_children_of_aligned_sum_units_preserve_decomposability(make_layout):
+    progressive_circuit = _make_children_target_circuit(make_layout())
+
+    for task_name in ["task-a", "task-b", "task-c"]:
+        progressive_circuit.add_column(task_name=task_name)
+
+    assert progressive_circuit.circuit.is_decomposable()

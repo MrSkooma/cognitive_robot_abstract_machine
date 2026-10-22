@@ -9,7 +9,8 @@ import copy
 import math
 from collections import deque
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from enum import Enum, auto
 
 from probabilistic_model.learning.progressive.exceptions import (
     ColumnStructureMismatchError,
@@ -21,6 +22,25 @@ from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import (
     SumUnit,
     Unit,
 )
+from probabilistic_model.utils import logsumexp
+
+
+# %% earlier column target
+class EarlierColumnTarget(Enum):
+    """
+    The units of an earlier column that a sum unit of a new column gets edges to.
+    """
+
+    ALIGNED_SUM_UNIT = auto()
+    """
+    The sum unit at the same position in the earlier column.
+    """
+
+    CHILDREN_OF_ALIGNED_SUM_UNIT = auto()
+    """
+    The children that sum unit has inside the earlier column, so the new column learns
+    a weight for every one of them.
+    """
 
 
 # %% circuit column
@@ -114,6 +134,29 @@ class AlignedUnits:
         ) == tuple(self.right.variables)
 
 
+# %% edges to earlier columns
+@dataclass(frozen=True)
+class EdgeToEarlierColumn:
+    """
+    An edge from a sum unit of a new column to a unit of an earlier column.
+    """
+
+    source: SumUnit
+    """
+    The sum unit of the new column.
+    """
+
+    target: Unit
+    """
+    The unit of the earlier column.
+    """
+
+    log_share: float
+    """
+    Logarithm of the share of the earlier column's start weight that the edge gets.
+    """
+
+
 # %% progressive probabilistic circuit
 @dataclass
 class ProgressiveProbabilisticCircuit:
@@ -122,8 +165,8 @@ class ProgressiveProbabilisticCircuit:
     progressive neural networks do.
 
     Every column is a copy of :attr:`template`. Each sum unit of a new column also mixes
-    the aligned sum units of every earlier column, so the new column can reuse them
-    while they stay unchanged.
+    units of every earlier column, chosen by :attr:`earlier_column_target`, so the new
+    column can reuse them while they stay unchanged.
     """
 
     template: ProbabilisticCircuit
@@ -138,6 +181,11 @@ class ProgressiveProbabilisticCircuit:
     children keep the rest in the proportions of :attr:`template`.
 
     In ``[0, 1)``; with ``0`` new columns do not read from earlier columns.
+    """
+
+    earlier_column_target: EarlierColumnTarget = EarlierColumnTarget.ALIGNED_SUM_UNIT
+    """
+    The units of every earlier column that the sum units of a new column get edges to.
     """
 
     columns: list[CircuitColumn] = field(default_factory=list, init=False)
@@ -182,9 +230,10 @@ class ProgressiveProbabilisticCircuit:
         """
         Add a column for a new task, connected to every earlier column.
 
-        Every sum unit of the new column also mixes the aligned sum unit of each earlier
-        column, starting with :attr:`earlier_column_share` of its weight. The circuit
-        stays unchanged if the template no longer matches the earlier columns.
+        Every sum unit of the new column also mixes the :attr:`earlier_column_target`
+        units of each earlier column, starting with :attr:`earlier_column_share` of its
+        weight. The circuit stays unchanged if the template no longer matches the
+        earlier columns.
 
         :param task_name: Readable name of the task.
         :return: The new column.
@@ -192,7 +241,7 @@ class ProgressiveProbabilisticCircuit:
             the earlier columns.
         """
         template_copy = copy.deepcopy(self.template)
-        aligned_sum_units = self._aligned_sum_units(
+        edges = self._edges_to_earlier_columns(
             CircuitColumn(task_name=task_name, root=template_copy.root)
         )
         mounted_units = self.circuit.mount(template_copy.root)
@@ -200,33 +249,27 @@ class ProgressiveProbabilisticCircuit:
             task_name=task_name, root=mounted_units[template_copy.root.index]
         )
         self._connect_to_earlier_columns(
-            [
-                AlignedUnits(mounted_units[aligned.left.index], aligned.right)
-                for aligned in aligned_sum_units
-            ]
+            [replace(edge, source=mounted_units[edge.source.index]) for edge in edges]
         )
         self.columns.append(column)
         self.root.add_subcircuit(column.root, log_weight=0.0)
         self.weight_root_by_sample_count()
         return column
 
-    def _connect_to_earlier_columns(
-        self, aligned_sum_units: list[AlignedUnits]
-    ) -> None:
+    def _connect_to_earlier_columns(self, edges: list[EdgeToEarlierColumn]) -> None:
         """
-        Make every earlier sum unit a child of its aligned sum unit of the new column,
-        with :attr:`earlier_column_share` of the start weight split equally among the
+        Add the edges from the new column to the earlier columns, with
+        :attr:`earlier_column_share` of the start weight split equally among the
         earlier columns.
 
         With an :attr:`earlier_column_share` of ``0``, the new column is not connected.
 
-        :param aligned_sum_units: The sum units of the new column, already in the
-            circuit, paired with the aligned sum unit of each earlier column.
+        :param edges: The edges, their sources already in the circuit.
         """
-        if not aligned_sum_units or self.earlier_column_share == 0.0:
+        if not edges or self.earlier_column_share == 0.0:
             return
         own_log_share = math.log(1 - self.earlier_column_share)
-        for sum_unit in {aligned.left for aligned in aligned_sum_units}:
+        for sum_unit in {edge.source for edge in edges}:
             sum_unit.normalize()
             for log_weight, child in sum_unit.log_weighted_subcircuits:
                 self.circuit.add_edge(
@@ -235,26 +278,78 @@ class ProgressiveProbabilisticCircuit:
         earlier_column_log_weight = math.log(
             self.earlier_column_share / len(self.columns)
         )
-        for aligned in aligned_sum_units:
+        for edge in edges:
             self.circuit.add_edge(
-                aligned.left, aligned.right, log_weight=earlier_column_log_weight
+                edge.source,
+                edge.target,
+                log_weight=earlier_column_log_weight + edge.log_share,
             )
 
-    def _aligned_sum_units(self, column: CircuitColumn) -> list[AlignedUnits]:
+    def _edges_to_earlier_columns(
+        self, column: CircuitColumn
+    ) -> list[EdgeToEarlierColumn]:
         """
-        Pair every sum unit of a column with the aligned sum unit of each earlier
-        column, earliest column first.
+        Get the edges from every sum unit of a column to the
+        :attr:`earlier_column_target` units of each earlier column, earliest column
+        first.
 
         :param column: A column that is not part of the circuit yet.
-        :return: The pairs, the unit of ``column`` on the left.
+        :return: The edges, with their share of the earlier column's start weight.
         :raises ColumnStructureMismatchError: If the column differs in structure from an
             earlier column.
         """
         return [
-            aligned
+            edge
             for earlier_column in self.columns
             for aligned in self.aligned_units(column, earlier_column)
             if isinstance(aligned.left, SumUnit)
+            for edge in self._edges_to_earlier_column(aligned, earlier_column)
+        ]
+
+    def _edges_to_earlier_column(
+        self, aligned_sum_units: AlignedUnits, earlier_column: CircuitColumn
+    ) -> list[EdgeToEarlierColumn]:
+        """
+        Get the edges from a sum unit of a new column to the
+        :attr:`earlier_column_target` units of one earlier column.
+
+        Edges to the children of the aligned sum unit share the earlier column's start
+        weight in proportion to the weights of that sum unit, or equally if that sum
+        unit gives its children no weight.
+
+        :param aligned_sum_units: The sum unit of the new column, paired with the
+            aligned sum unit of ``earlier_column``.
+        :param earlier_column: The earlier column.
+        :return: The edges, with their share of the earlier column's start weight.
+        """
+        if self.earlier_column_target is EarlierColumnTarget.ALIGNED_SUM_UNIT:
+            return [
+                EdgeToEarlierColumn(
+                    aligned_sum_units.left, aligned_sum_units.right, log_share=0.0
+                )
+            ]
+        own_log_weighted_children = [
+            (log_weight, child)
+            for log_weight, child in aligned_sum_units.right.log_weighted_subcircuits
+            if earlier_column.contains(child)
+        ]
+        log_total_weight = float(
+            logsumexp([log_weight for log_weight, _ in own_log_weighted_children])
+        )
+        if log_total_weight == -math.inf:
+            return [
+                EdgeToEarlierColumn(
+                    aligned_sum_units.left,
+                    child,
+                    log_share=-math.log(len(own_log_weighted_children)),
+                )
+                for _, child in own_log_weighted_children
+            ]
+        return [
+            EdgeToEarlierColumn(
+                aligned_sum_units.left, child, log_share=log_weight - log_total_weight
+            )
+            for log_weight, child in own_log_weighted_children
         ]
 
     def restrict_root_to(self, column: CircuitColumn) -> None:
