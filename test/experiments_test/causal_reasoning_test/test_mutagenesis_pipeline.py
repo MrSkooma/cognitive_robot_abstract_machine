@@ -13,7 +13,6 @@ skipping there.
 
 from __future__ import annotations
 
-import experiments.orm.ormatic_interface  # type: ignore  # noqa: F401
 import numpy as np
 import pytest
 from random_events.product_algebra import SimpleEvent
@@ -139,15 +138,15 @@ def _predict_mutagenic(
         when ``molecule``'s evidence is unsupported by the fitted circuit.
     """
     evidence = _evidence_for(molecule, circuit)
-    conditioned, log_likelihood = circuit.log_conditional(evidence)
-    if conditioned is None:
+    conditioning = circuit.log_conditional(evidence)
+    if conditioning.distribution is None:
         return majority_label
     true_event = (
         SimpleEvent.from_data({mutagenic_variable: True})
         .as_composite_set()
-        .fill_missing_variables_pure(conditioned.variables)
+        .fill_missing_variables_pure(conditioning.distribution.variables)
     )
-    return conditioned.probability(true_event) > 0.5
+    return conditioning.distribution.probability(true_event) > 0.5
 
 
 @requires_mutagenesis_dataset

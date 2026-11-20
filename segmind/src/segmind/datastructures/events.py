@@ -1,3 +1,7 @@
+"""
+The events SegMind detects in an episode.
+"""
+
 from __future__ import annotations
 
 from abc import abstractmethod, ABC
@@ -5,14 +9,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import cached_property
 
-from typing_extensions import Optional, List
 
 from segmind.datastructures.object_tracker import (
     ObjectEventTracker,
     ObjectTrackerFactory,
 )
 from semantic_digital_twin.semantic_annotations.semantic_annotations import Aperture
-from semantic_digital_twin.spatial_types.spatial_types import Pose
+from krrood_spatial_math.spatial_types import Pose
 from semantic_digital_twin.world_description.geometry import VolumetricBoundingBox
 from semantic_digital_twin.world_description.world_entity import Body
 
@@ -52,11 +55,11 @@ class EventWithTrackedObjects(DetectionEvent, ABC):
     tracked_object: Body
     """The primary object involved in this event."""
 
-    with_object: Optional[Body] = None
+    with_object: Body | None = None
     """The secondary object involved in this event, if any."""
 
     @property
-    def tracked_objects(self) -> List[Body]:
+    def tracked_objects(self) -> list[Body]:
         """
         :return: the primary object, plus the secondary object when present.
         """
@@ -74,7 +77,7 @@ class EventWithTrackedObjects(DetectionEvent, ABC):
         return ObjectTrackerFactory.get_tracker(self.tracked_object)
 
     @cached_property
-    def with_object_tracker(self) -> Optional[ObjectEventTracker]:
+    def with_object_tracker(self) -> ObjectEventTracker | None:
         """
         :return: the event tracker for :attr:`with_object`, or ``None`` if absent.
         """
@@ -203,14 +206,14 @@ class AbstractContactEvent(EventWithTrackedObjects, ABC):
     Pose of the object, in the world frame.
     """
 
-    with_object_bounding_box: Optional[VolumetricBoundingBox] = field(
+    with_object_bounding_box: VolumetricBoundingBox | None = field(
         init=False, default=None
     )
     """
     Bounding box of the second object in contact.
     """
 
-    world_T_with_object: Optional[Pose] = field(init=False, default=None)
+    world_T_with_object: Pose | None = field(init=False, default=None)
     """
     Pose of the second object in contact, in the world frame.
     """
@@ -289,7 +292,7 @@ class InsertionEvent(EventWithTrackedObjects):
     Represents an event where an object is inserted into another object.
     """
 
-    inserted_into_objects: List[Body] = field(default_factory=list)
+    inserted_into_objects: list[Body] = field(default_factory=list)
     """
     List of objects into which the object was inserted.
     """
@@ -318,6 +321,39 @@ class ContainmentEvent(EventWithTrackedObjects):
 class LossOfContainmentEvent(EventWithTrackedObjects):
     """
     Represents an event where an object is no longer contained in another object.
+    """
+
+    ...
+
+
+@dataclass(unsafe_hash=True)
+class OpeningEvent(EventWithTrackedObjects, ABC):
+    """
+    Represents an event where a moving part, such as a drawer or a door, came to stand
+    open or closed.
+    """
+
+    opening_ratio: float = field(kw_only=True)
+    """
+    How far the part stood open when the event was detected, as
+    :attr:`~semantic_digital_twin.semantic_annotations.mixins.HasMovableJoint.opening_ratio`
+    reads it.
+    """
+
+
+@dataclass(unsafe_hash=True)
+class OpenedEvent(OpeningEvent):
+    """
+    Represents an event where a moving part came to stand open.
+    """
+
+    ...
+
+
+@dataclass(unsafe_hash=True)
+class ClosedEvent(OpeningEvent):
+    """
+    Represents an event where a moving part came to stand closed.
     """
 
     ...

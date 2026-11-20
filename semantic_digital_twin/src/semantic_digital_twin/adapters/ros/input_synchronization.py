@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from nav_msgs.msg import Odometry
 from sensor_msgs.msg import JointState
-from typing_extensions import Dict, List, Tuple, Union
+from typing_extensions import Union
 
 from semantic_digital_twin.adapters.ros.latest_message_subscriber import (
     LatestMessageSubscriber,
@@ -22,7 +22,7 @@ from semantic_digital_twin.robots.input_source import (
     BasePoseSource,
     JointPositionSource,
 )
-from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world_description.connections import (
     ActiveConnection1DOF,
     Connection6DoF,
@@ -68,6 +68,10 @@ class TopicInputSynchronizer(
 class JointStateInputSynchronizer(TopicInputSynchronizer[JointState], ABC):
     """
     Writes the positions of a joint state message into the world state.
+
+    A message reports the position of each joint, with the joint's multiplier and offset
+    applied, so a mimic joint reported next to the joint it mimics leaves both where the
+    message put them.
     """
 
     def apply_message(self, message: JointState) -> None:
@@ -77,7 +81,9 @@ class JointStateInputSynchronizer(TopicInputSynchronizer[JointState], ABC):
             )
             if not self.writes(connection):
                 continue
-            self.world.state[connection.raw_dof.id].position = position
+            self.world.state[connection.raw_dof.id].position = (
+                position - connection.offset
+            ) / connection.multiplier
 
     def writes(self, connection: ActiveConnection1DOF) -> bool:
         """
@@ -139,7 +145,7 @@ class SubscribedJointPositionSource(
     whatever reads it.
     """
 
-    connections: List[ActiveConnection1DOF] = field(kw_only=True)
+    connections: list[ActiveConnection1DOF] = field(kw_only=True)
     """
     The connections of the part this source is attached to.
     """
@@ -215,7 +221,7 @@ class TfFrameSynchronizer(InputSynchronizer, HasROS2Node):
     Writes tf transforms into 6 degree of freedom connections.
     """
 
-    connection_to_frames: Dict[Connection6DoF, Tuple[str, str]] = field(
+    connection_to_frames: dict[Connection6DoF, tuple[str, str]] = field(
         init=False, default_factory=dict
     )
     """

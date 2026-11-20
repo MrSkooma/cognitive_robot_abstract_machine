@@ -1,15 +1,20 @@
+"""
+Tests of the PR2's kinematics, control commands and semantic annotations.
+"""
+
+from __future__ import annotations
+
 from collections import defaultdict
 
 import numpy as np
 import pytest
-from typing_extensions import List
 
 from semantic_digital_twin.adapters.urdf import URDFParser
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.exceptions import (
-    BrokenWorldModificationHistoryError,
+    DuplicateRobotAssignmentsError,
+    PartiallyAppliedWorldModificationError,
 )
-from semantic_digital_twin.orm.ormatic_interface import *  # noqa
 from semantic_digital_twin.reasoning.predicates import LeftOf
 from semantic_digital_twin.robots.hsrb import HSRB
 from semantic_digital_twin.robots.pr2 import (
@@ -29,17 +34,12 @@ from semantic_digital_twin.robots.pr2 import (
     PR2RightGripperRightFinger,
     PR2KinectV1,
 )
-from semantic_digital_twin.robots.robot_parts import KinematicChain
+from semantic_digital_twin.robots.robot_parts import RobotKinematicChain
 from semantic_digital_twin.robots.stretch import Stretch
 from semantic_digital_twin.robots.tracy import Tracy
-from semantic_digital_twin.spatial_computations.ik_solver import (
-    MaxIterationsException,
-    UnreachableException,
-)
-from semantic_digital_twin.spatial_types.derivatives import Derivatives
-from semantic_digital_twin.spatial_types.spatial_types import (
-    HomogeneousTransformationMatrix,
-)
+from semantic_digital_twin.world_description.derivatives import Derivatives
+from semantic_digital_twin.world_description.kinematic_chain import KinematicChain
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import (
     OmniDrive,
@@ -112,8 +112,9 @@ def test_duplicate_robot_assignments_error_pr2(pr2_world_state_reset):
     assert pr2 is not None, "PR2 robot not found in world state reset"
 
     # Create another robot
-    with pytest.raises(BrokenWorldModificationHistoryError):
+    with pytest.raises(PartiallyAppliedWorldModificationError) as error_info:
         pr2_2 = PR2.from_world(pr2_world_state_reset)
+    assert isinstance(error_info.value.cause, DuplicateRobotAssignmentsError)
 
 
 def test_compute_chain_of_connections_error_pr2(pr2_world_state_reset):
@@ -232,47 +233,6 @@ def test_compute_fk_np_l_elbow_flex_joint_pr2(pr2_world_state_reset):
             ]
         ),
     )
-
-
-def test_compute_ik(pr2_world_state_reset):
-    bf = pr2_world_state_reset.root
-    eef = pr2_world_state_reset.get_kinematic_structure_entity_by_name(
-        "r_gripper_tool_frame"
-    )
-    fk = pr2_world_state_reset.compute_forward_kinematics_np(bf, eef)
-    fk[0, 3] -= 0.2
-    joint_state = pr2_world_state_reset.compute_inverse_kinematics(
-        bf, eef, HomogeneousTransformationMatrix(fk, reference_frame=bf)
-    )
-    for joint, state in joint_state.items():
-        pr2_world_state_reset.state[joint.id].position = state
-    pr2_world_state_reset.notify_state_change()
-    actual_fk = pr2_world_state_reset.compute_forward_kinematics_np(bf, eef)
-    assert np.allclose(actual_fk, fk, atol=1e-3)
-
-
-def test_compute_ik_max_iter(pr2_world_state_reset):
-    bf = pr2_world_state_reset.root
-    eef = pr2_world_state_reset.get_kinematic_structure_entity_by_name(
-        "r_gripper_tool_frame"
-    )
-    fk = pr2_world_state_reset.compute_forward_kinematics_np(bf, eef)
-    fk[2, 3] = 10
-    with pytest.raises(MaxIterationsException):
-        pr2_world_state_reset.compute_inverse_kinematics(
-            bf, eef, HomogeneousTransformationMatrix(fk, reference_frame=bf)
-        )
-
-
-def test_compute_ik_unreachable(pr2_world_state_reset):
-    bf = pr2_world_state_reset.root
-    eef = pr2_world_state_reset.get_kinematic_structure_entity_by_name("base_footprint")
-    fk = pr2_world_state_reset.compute_forward_kinematics_np(bf, eef)
-    fk[2, 3] = -1
-    with pytest.raises(UnreachableException):
-        pr2_world_state_reset.compute_inverse_kinematics(
-            bf, eef, HomogeneousTransformationMatrix(fk, reference_frame=bf)
-        )
 
 
 def test_apply_control_commands_omni_drive_pr2(pr2_world_state_reset):
@@ -451,9 +411,9 @@ def test_has_left_right_arm_mixin(pr2_world_state_reset):
     left_arm_chain = list(pr2.left_arm.bodies)
     right_arm_chain = list(pr2.right_arm.bodies)
     assert LeftOf(
-        left_arm_chain[1].center_of_mass,
-        right_arm_chain[1].center_of_mass,
-        pr2.root.global_transform,
+        point=left_arm_chain[1].center_of_mass,
+        other=right_arm_chain[1].center_of_mass,
+        point_of_view=pr2.root.global_transform,
     )()
 
 
@@ -479,12 +439,26 @@ def test_an_arm_covers_the_chain_down_to_its_end_effector(pr2_world_state_reset)
 
 
 def test_kinematic_chains(pr2_world_state_reset):
-    semantic_kinematic_chain_annotation: List[KinematicChain] = (
-        pr2_world_state_reset.get_semantic_annotations_by_type(KinematicChain)
+    """
+    Every kinematic chain of the PR2 has a root and a tip.
+    """
+    semantic_kinematic_chain_annotation: list[RobotKinematicChain] = (
+        pr2_world_state_reset.get_semantic_annotations_by_type(RobotKinematicChain)
     )
     for chain in semantic_kinematic_chain_annotation:
         assert chain.root
         assert chain.tip
+
+
+def test_a_robot_kinematic_chain_is_a_kinematic_chain(pr2_world_state_reset):
+    """
+    An arm stands wherever a chain from a root to a tip is taken, and stays usable as a
+    key while doing so.
+    """
+    pr2 = pr2_world_state_reset.get_semantic_annotations_by_type(PR2)[0]
+
+    assert isinstance(pr2.left_arm, KinematicChain)
+    assert {pr2.left_arm, pr2.right_arm} == {pr2.right_arm, pr2.left_arm}
 
 
 def test_tracy_semantic_annotation(tracy_world):
@@ -671,7 +645,7 @@ def test_split_chain_of_connections(pr2_world_state_reset):
 def test_robots_and_validate(supported_abstract_robots):
     for abstract_robot in supported_abstract_robots:
         print(f"Testing robot: {abstract_robot.__name__}")
-        world = URDFParser.from_file(abstract_robot.get_ros_file_path()).parse()
+        world = URDFParser.from_file(abstract_robot.get_ros_file_path()).create_world()
         robot = abstract_robot.from_world(world)
         robot.validate()
 
@@ -711,12 +685,12 @@ def test_pr2_automatic_setup_correctly(pr2_world_state_reset):
     verified_parts = set()
 
     def verify_part(part, expected_type, parent_robot):
-        assert isinstance(
-            part, expected_type
-        ), f"Part {part} is not of expected type {expected_type}"
-        assert (
-            part._robot == parent_robot
-        ), f"Part {part} back-reference to robot is incorrect"
+        assert isinstance(part, expected_type), (
+            f"Part {part} is not of expected type {expected_type}"
+        )
+        assert part._robot == parent_robot, (
+            f"Part {part} back-reference to robot is incorrect"
+        )
         verified_parts.add(part)
         return part
 
@@ -748,9 +722,9 @@ def test_pr2_automatic_setup_correctly(pr2_world_state_reset):
     right_gripper = verify_part(right_arm.end_effector, PR2RightGripper, robot)
 
     # 8. Grippers -> Fingers (via HasTwoFingers -> HasFingers mixin)
-    assert (
-        len(left_gripper.fingers) == 2
-    ), "Left gripper should have exactly two fingers"
+    assert len(left_gripper.fingers) == 2, (
+        "Left gripper should have exactly two fingers"
+    )
     l_l_finger = next(
         f for f in left_gripper.fingers if isinstance(f, PR2LeftGripperLeftFinger)
     )
@@ -760,9 +734,9 @@ def test_pr2_automatic_setup_correctly(pr2_world_state_reset):
     verify_part(l_l_finger, PR2LeftGripperLeftFinger, robot)
     verify_part(l_r_finger, PR2LeftGripperRightFinger, robot)
 
-    assert (
-        len(right_gripper.fingers) == 2
-    ), "Right gripper should have exactly two fingers"
+    assert len(right_gripper.fingers) == 2, (
+        "Right gripper should have exactly two fingers"
+    )
     r_l_finger = next(
         f for f in right_gripper.fingers if isinstance(f, PR2RightGripperLeftFinger)
     )
@@ -778,14 +752,14 @@ def test_pr2_automatic_setup_correctly(pr2_world_state_reset):
     all_discovered_parts = set(robot._robot_parts)
 
     missing_from_hierarchy = all_discovered_parts - verified_parts
-    assert (
-        not missing_from_hierarchy
-    ), f"Some robot parts were discovered but not verified: {missing_from_hierarchy}"
+    assert not missing_from_hierarchy, (
+        f"Some robot parts were discovered but not verified: {missing_from_hierarchy}"
+    )
 
     extra_in_hierarchy = verified_parts - all_discovered_parts
-    assert (
-        not extra_in_hierarchy
-    ), f"Some verified parts were not in robot._robot_parts: {extra_in_hierarchy}"
+    assert not extra_in_hierarchy, (
+        f"Some verified parts were not in robot._robot_parts: {extra_in_hierarchy}"
+    )
 
 
 def test_pr2_degrees_of_freedom_with_hardware_interface(pr2_world_state_reset):
@@ -823,13 +797,13 @@ def test_pr2_degrees_of_freedom_with_hardware_interface(pr2_world_state_reset):
 
     actual_dof_names = {dof.name.name for dof in dofs}
 
-    assert (
-        len(dofs) == 17
-    ), f"Expected 17 DOFs with hardware interface, but got {len(dofs)}: {actual_dof_names}"
+    assert len(dofs) == 17, (
+        f"Expected 17 DOFs with hardware interface, but got {len(dofs)}: {actual_dof_names}"
+    )
 
-    assert (
-        actual_dof_names == expected_dof_names
-    ), f"Missing DOFs: {expected_dof_names - actual_dof_names}, Extra DOFs: {actual_dof_names - expected_dof_names}"
+    assert actual_dof_names == expected_dof_names, (
+        f"Missing DOFs: {expected_dof_names - actual_dof_names}, Extra DOFs: {actual_dof_names - expected_dof_names}"
+    )
 
 
 # %% joint name enum

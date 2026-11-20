@@ -1,10 +1,11 @@
-"""Source-code formatting helpers backed by external tools (Black, Ruff)."""
+"""
+Source-code formatting helpers backed by external tools (Black, Ruff).
+"""
 
 from __future__ import annotations
 
 import subprocess
 import sys
-from typing import List
 
 from krrood.exceptions import SubprocessExecutionError
 
@@ -12,8 +13,9 @@ from krrood.exceptions import SubprocessExecutionError
 # Formatting
 
 
-def run_subprocess_on_file(command: List[str]) -> None:
-    """Run a subprocess command and handle errors.
+def run_subprocess_on_file(command: list[str]) -> None:
+    """
+    Run a subprocess command and handle errors.
 
     :param command: The command to run as a list of arguments.
     :raises SubprocessExecutionError: If the subprocess command fails.
@@ -21,11 +23,14 @@ def run_subprocess_on_file(command: List[str]) -> None:
     try:
         result = subprocess.run(command, check=True, capture_output=True, text=True)
     except subprocess.CalledProcessError as e:
-        raise SubprocessExecutionError(command, e.returncode, e.stdout, e.stderr) from e
+        raise SubprocessExecutionError(
+            command=command, return_code=e.returncode, stdout=e.stdout, stderr=e.stderr
+        ) from e
 
 
 def run_black_on_file(filename: str) -> None:
-    """Format *filename* with Black.
+    """
+    Format *filename* with Black.
 
     :param filename: The name of the file to format.
     """
@@ -34,7 +39,8 @@ def run_black_on_file(filename: str) -> None:
 
 
 def run_ruff_check_on_file(filename: str) -> None:
-    """Lint and fix *filename* with Ruff.
+    """
+    Lint and fix *filename* with Ruff.
 
     :param filename: The name of the file to format.
     """
@@ -50,3 +56,34 @@ def run_ruff_format_on_file(filename: str) -> None:
     """
     command = ["ruff", "format", filename]
     run_subprocess_on_file(command)
+
+
+def remove_unused_imports(source: str) -> str:
+    """
+    Remove the imports *source* never uses, as Ruff's unused-import fix does.
+
+    :param source: The Python module source.
+    :return: The module source without its unused imports.
+    :raises SubprocessExecutionError: If Ruff cannot fix the source.
+    """
+    command = [
+        sys.executable,
+        "-m",
+        "ruff",
+        "check",
+        "--isolated",
+        "--select",
+        "F401",
+        "--fix",
+        "--quiet",
+        "-",
+    ]
+    result = subprocess.run(command, input=source, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise SubprocessExecutionError(
+            command=command,
+            return_code=result.returncode,
+            stdout=result.stdout,
+            stderr=result.stderr,
+        )
+    return result.stdout

@@ -1,8 +1,12 @@
+"""
+The fold that builds a verbalization fragment for an expression from the grammar rules.
+"""
+
 from __future__ import annotations
 
 from dataclasses import replace
 
-from typing_extensions import TYPE_CHECKING, Optional, Sequence
+from typing_extensions import TYPE_CHECKING, Sequence
 
 from krrood.entity_query_language.core.base_expressions import SymbolicExpression
 from krrood.entity_query_language.verbalization.fragments.base import (
@@ -14,7 +18,9 @@ from krrood.entity_query_language.verbalization.grammar.framework.phrase_rule im
     PhraseRule,
     select,
 )
-from krrood.entity_query_language.verbalization.grammar.framework.registry import RULES
+from krrood.entity_query_language.verbalization.grammar.framework.registry import (
+    PhraseRuleRegistry,
+)
 from krrood.entity_query_language.verbalization.exceptions import (
     UnverbalizableExpressionError,
 )
@@ -29,7 +35,7 @@ if TYPE_CHECKING:
 def root_context(
     services: MicroplanningServices,
     rules: Sequence[PhraseRule],
-    options: Optional[RenderOptions] = None,
+    options: RenderOptions | None = None,
 ) -> RuleContext:
     """
     Build the :class:`RuleContext` for one node — the **single** definition of the fold
@@ -43,8 +49,8 @@ def root_context(
 
     >>> from krrood.entity_query_language.verbalization.context import MicroplanningServices
     >>> robot = variable(Robot, [])
-    >>> context = root_context(MicroplanningServices.from_expression(robot), RULES)
-    >>> type(context.child(robot)).__name__
+    >>> context = root_context(MicroplanningServices.from_expression(expression=robot), PhraseRuleRegistry.loaded_rules())
+    >>> type(context.child(node=robot)).__name__
     'NounPhrase'
     """
     return RuleContext(
@@ -59,8 +65,8 @@ def root_context(
 def fold(
     node: FoldNode,
     services: MicroplanningServices,
-    rules: Optional[Sequence[PhraseRule]] = None,
-    options: Optional[RenderOptions] = None,
+    rules: Sequence[PhraseRule] | None = None,
+    options: RenderOptions | None = None,
 ) -> VerbalizationFragment:
     """
     Verbalize *node* by dispatching it to its matching grammar rule and recursing — the
@@ -89,7 +95,7 @@ def fold(
     >>> verbalize_expression(variable(Robot, []).battery)
     'the battery of a Robot'
     """
-    rules = RULES if rules is None else rules
+    rules = PhraseRuleRegistry.loaded_rules() if rules is None else rules
 
     if isinstance(node, SymbolicExpression):
         override = services.binding.binding_overrides.get(node._id_)
@@ -106,8 +112,8 @@ def fold(
         # so a nested Entity renders as a noun phrase. Declared on the rule (not pushed by hand
         # in assemblers) so the policy lives in one place. ``when`` already ran outside.
         with services.configuration.query_depth_scope():
-            return _with_source(rule.build(node, context), node)
-    return _with_source(rule.build(node, context), node)
+            return _with_source(rule.build(node=node, context=context), node)
+    return _with_source(rule.build(node=node, context=context), node)
 
 
 def _with_source(
@@ -125,9 +131,9 @@ def _with_source(
 
     >>> from krrood.entity_query_language.verbalization.fragments.base import RoleFragment
     >>> robot = variable(Robot, [])
-    >>> _with_source(RoleFragment.for_variable("Robot", robot), robot).source is robot
+    >>> _with_source(RoleFragment.for_variable(label="Robot", expression=robot), robot).source is robot
     True
-    >>> stamped = _with_source(RoleFragment.for_variable("Robot", robot), robot)
+    >>> stamped = _with_source(RoleFragment.for_variable(label="Robot", expression=robot), robot)
     >>> _with_source(stamped, variable(Robot, [])).source is robot
     True
     """

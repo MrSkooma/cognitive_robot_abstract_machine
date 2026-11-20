@@ -1,10 +1,13 @@
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import List
 
+import numpy as np
 import trimesh
 
 from semantic_digital_twin.pipeline.mesh_decomposition.base import MeshDecomposer
+from semantic_digital_twin.pipeline.mesh_decomposition.exceptions import (
+    MeshWithoutConvexPartsError,
+)
 from semantic_digital_twin.world_description.geometry import Mesh
 
 
@@ -109,8 +112,16 @@ class VHACDMeshDecomposer(MeshDecomposer):
     Originally referenced as findBestPlane.
     """
 
-    def apply_to_mesh(self, mesh: Mesh) -> List[Mesh]:
-        decomposed = mesh.mesh.convex_decomposition(
+    def apply_to_mesh(self, mesh: Mesh) -> list[Mesh]:
+        """
+        :meth:`MeshDecomposer.apply_to_mesh`, where a mesh in which V-HACD finds no convex
+        parts, such as a flat one without volume, has its convex hull as its only part.
+
+        :raises MeshWithoutConvexPartsError: If V-HACD finds no convex parts and the
+            mesh's vertices span no plane.
+        """
+        trimesh_mesh = mesh.mesh
+        decomposed = trimesh_mesh.convex_decomposition(
             maxConvexHulls=self.max_convex_hulls,
             resolution=self.resolution,
             minimumVolumePercentErrorAllowed=self.minimum_volume_percent_error_allowed,
@@ -122,11 +133,20 @@ class VHACDMeshDecomposer(MeshDecomposer):
             minEdgeLength=self.min_edge_length,
             findBestPlane=self.find_best_plane,
         )
-        new_geometry = [
+        if not decomposed:
+            vertices = trimesh_mesh.vertices
+            # Qhull needs four points to start a hull, and they must not lie on a line
+            vertices_span_a_plane = (
+                len(vertices) >= 4
+                and np.linalg.matrix_rank(vertices - vertices.mean(axis=0)) >= 2
+            )
+            if not vertices_span_a_plane:
+                raise MeshWithoutConvexPartsError(mesh=mesh)
+            decomposed = [trimesh_mesh.convex_hull]
+        return [
             Mesh.from_trimesh(mesh=decomposed_part, origin=mesh.origin)
             for decomposed_part in decomposed
         ]
-        return new_geometry
 
     def apply_to_mesh_and_save(self, mesh: Mesh, output_path: str) -> str:
         parts = self.apply_to_mesh(mesh)

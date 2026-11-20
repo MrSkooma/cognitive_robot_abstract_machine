@@ -1,8 +1,8 @@
 # Abstract Robot Overview
 
 To define and manage semantic information about robots CoraPlex uses the `AbstractRobot` class of the semantic
-digital twin. Specific instances of the `AbstractRobot` class are part of the Context that is passed to the Plan on
-creation.
+digital twin. The robot performing a plan is given to the executor running it, in the plan's `RobotAccess` context
+extension.
 
 The `AbstractRobot` class defines a semantic, high-level model of a robot as it appears in a world description. Rather
 than focusing on actuation details or low-level control, it organizes the robot's physical and functional structure into
@@ -24,7 +24,7 @@ A robot is a semantic annotation with a `root` body typically representing its b
 composed of structured semantic annotations of its parts (all defined in
 `semantic_digital_twin.robots.robot_parts`):
 
-* A `KinematicChain` is a contiguous sequence of kinematic structure entities from a `root` body to a `tip` body.
+* A `RobotKinematicChain` is a contiguous sequence of kinematic structure entities from a `root` body to a `tip` body.
 * An `EndEffector` is the abstract base for end effectors and always defines a `tool_frame`. Each concrete end
   effector states, in its tool frame, the `approach_axis` it travels toward an object along and the `closing_axis`
   its fingers close along; together they are the grasp frame's x- and y-axis. Concrete
@@ -59,6 +59,9 @@ allowing higher-level code to discover how to command base motion without hard-c
 For safety and performance tuning, the robot provides `tighten_dof_velocity_limits_of_1dof_connections` and
 `tighten_dof_velocity_limits_proportionally` to constrain the velocity limits of its one-degree-of-freedom active
 connections.
+A mobile base declares how fast the drive of the real robot may move it in `drive_velocity_limits`, and
+the name of the frame the real robot reports its odometry relative to in `odometry_body_name`; a
+`RobotSpecification` creates the odometry body and the drive from them.
 
 ## Construction and Extensibility
 
@@ -83,7 +86,7 @@ world model.
 ## Key takeaways
 
 - `AbstractRobot` is a semantic, world-backed description of a robot's structure and capabilities.
-- Parts are composed from `KinematicChain`, `EndEffector`, `Sensor` and `Torso` using specialized structures
+- Parts are composed from `RobotKinematicChain`, `EndEffector`, `Sensor` and `Torso` using specialized structures
   (mixins and generics), and reached as nested attributes.
 - Accessor methods such as `all_arms` and `get_default_camera()` query parts in a robot-agnostic way.
 - The robot is reconstructed from a `World` via `from_world`; new robots are added by subclassing and implementing

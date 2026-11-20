@@ -6,7 +6,8 @@ carries it.
 
 from __future__ import annotations
 
-from giskardpy.motion_statechart.context import MotionStatechartContext
+from cramph.context import StatechartContext
+from cramph.executor import StatechartExecutor
 from typing_extensions import List, Tuple, Type
 
 from segmind.datastructures.events import (
@@ -30,11 +31,11 @@ from segmind.detectors.spatial_relation_detector_nodes import (
 from segmind.detectors.agent_event_detector_nodes import (
     GraspDetector,
 )
-from segmind.episode_segmenter import EpisodeSegmenterExecutor
-from segmind.statecharts.segmind_statechart import SegmindStatechart
+from segmind.episode_segmenter import EpisodeSegmentation
+from segmind.statecharts.segmind_statechart import DetectorStatechartBuilder
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.robots.robot_parts import EndEffector
-from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import (
     Connection6DoF,
@@ -86,7 +87,7 @@ def _bottom_of(body: Body) -> float:
 
 
 def _box_at(
-    world: World, position: Tuple[float, float, float], size: float = BOX_SIZE
+    world: World, position: tuple[float, float, float], size: float = BOX_SIZE
 ) -> Body:
     """
     Add a box free to move to ``world``, standing at ``position``.
@@ -105,7 +106,7 @@ def _box_at(
     return box
 
 
-def _move_to(box: Body, position: Tuple[float, float, float]) -> None:
+def _move_to(box: Body, position: tuple[float, float, float]) -> None:
     """
     Stand ``box`` at ``position``, in the world's own frame.
     """
@@ -125,19 +126,23 @@ def _box_in_the_hand_of(world: World, gripper: EndEffector) -> Body:
 
 
 def _executor_for(
-    world: World, detectors: List[AbstractDetector]
-) -> EpisodeSegmenterExecutor:
-    executor = EpisodeSegmenterExecutor(context=MotionStatechartContext(world=world))
-    executor.compile(SegmindStatechart().build_statechart(detectors))
+    world: World, detectors: list[AbstractDetector]
+) -> StatechartExecutor:
+    executor = StatechartExecutor(
+        context=StatechartContext(world=world), extensions=[EpisodeSegmentation()]
+    )
+    executor.compile(
+        statechart=DetectorStatechartBuilder(detectors).build(executor.context)
+    )
     return executor
 
 
 def _events_of(
-    executor: EpisodeSegmenterExecutor,
-    event_type: Type[DetectionEvent],
+    executor: StatechartExecutor,
+    event_type: type[DetectionEvent],
     body: Body,
     with_object: bool = False,
-) -> List[DetectionEvent]:
+) -> list[DetectionEvent]:
     """
     :param with_object: Whether to answer with what each event happened with, rather
         than the events themselves.
@@ -145,7 +150,7 @@ def _events_of(
     events = [
         event
         for event in executor.context.require_extension(
-            SegmindContext
+            extension_type=SegmindContext
         ).logger.get_events()
         if type(event) is event_type and event.tracked_object is body
     ]
@@ -214,7 +219,9 @@ def test_a_grasp_is_read_from_the_contacts_found_with_the_hand(pr2_world_copy):
     gripper = _left_gripper(pr2_world_copy)
     box = _box_at(pr2_world_copy, (CARRIED_AWAY, CARRIED_AWAY, CARRIED_AWAY))
     executor = _executor_for(pr2_world_copy, [GraspDetector(tracked_object=box)])
-    executor.context.require_extension(SegmindContext).latest_contact_bodies[box] = {
+    executor.context.require_extension(
+        extension_type=SegmindContext
+    ).latest_contact_bodies[box] = {
         gripper.thumb.tip,
         gripper.finger.tip,
     }
@@ -236,9 +243,9 @@ def test_a_hand_touching_a_body_is_recorded_as_touching_it(pr2_world_copy):
 
     executor.tick()
 
-    touching = executor.context.require_extension(SegmindContext).latest_contact_bodies[
-        box
-    ]
+    touching = executor.context.require_extension(
+        extension_type=SegmindContext
+    ).latest_contact_bodies[box]
     assert touching & set(gripper.thumb.bodies) and touching & set(
         gripper.finger.bodies
     )

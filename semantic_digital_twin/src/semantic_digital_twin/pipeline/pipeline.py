@@ -4,14 +4,12 @@ import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Callable, TYPE_CHECKING
+from typing_extensions import Callable, TYPE_CHECKING
 
 import numpy as np
 
-from semantic_digital_twin.spatial_types import Point3
-from semantic_digital_twin.spatial_types.spatial_types import (
-    HomogeneousTransformationMatrix,
-)
+from krrood_spatial_math.spatial_types import Point3
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world_description.geometry import Mesh
 from semantic_digital_twin.world_description.world_entity import Body
 
@@ -49,7 +47,7 @@ class Pipeline:
     output World of one Step is passed as the input World to the next Step.
     """
 
-    steps: List[Step]
+    steps: list[Step]
     """
     The list of Steps to be applied in the Pipeline.
     """
@@ -89,7 +87,6 @@ class CenterLocalGeometryAndPreserveWorldPose(Step):
 
     def _apply(self, world: World) -> World:
         for body in world.bodies_topologically_sorted:
-
             vertices = []
 
             for coll in body.collision:
@@ -127,16 +124,17 @@ class CenterLocalGeometryAndPreserveWorldPose(Step):
                     body.parent_connection.parent_T_connection_expression
                 )
 
-                body.parent_connection.parent_T_connection_expression = (
-                    parent_T_old_origin @ old_origin_T_new_origin
+                body.parent_connection.update_parent_T_connection(
+                    parent_T_connection=parent_T_old_origin @ old_origin_T_new_origin
                 )
 
             for child in world.compute_child_kinematic_structure_entities(body):
                 old_origin_T_child_origin = (
                     child.parent_connection.parent_T_connection_expression
                 )
-                child.parent_connection.parent_T_connection_expression = (
-                    old_origin_T_new_origin.inverse() @ old_origin_T_child_origin
+                child.parent_connection.update_parent_T_connection(
+                    parent_T_connection=old_origin_T_new_origin.inverse()
+                    @ old_origin_T_child_origin
                 )
         return world
 

@@ -16,7 +16,7 @@ import sys
 from enum import StrEnum
 from functools import cache
 
-from typing_extensions import Optional, Sequence, Tuple
+from typing_extensions import Sequence
 
 from cognitive_robot_abstract_machine.exceptions import (
     MissingORMBuildChoiceError,
@@ -78,7 +78,7 @@ class OrmBuild(StrEnum):
     """
 
     @classmethod
-    def choices(cls) -> Tuple[str, ...]:
+    def choices(cls) -> tuple[str, ...]:
         """
         The choices a run can state, in the order the help of the option lists them.
         """
@@ -99,7 +99,7 @@ class OrmBuild(StrEnum):
         return cls(choice)
 
     @classmethod
-    def stated_on(cls, arguments: Sequence[str]) -> Optional[OrmBuild]:
+    def stated_on(cls, arguments: Sequence[str]) -> OrmBuild | None:
         """
         Read the choice a command line states, in either of the spellings argparse
         accepts.
@@ -156,22 +156,23 @@ class OrmBuild(StrEnum):
 
 
 @cache
-def regenerate_orm_interfaces() -> bool:
+def regenerate_orm_interfaces(package_name: str) -> bool:
     """
-    Build the ORM interfaces of this checkout, as far as the run asked for, once per
-    process and never on a worker.
+    Build the ORM interfaces a package's tests read, as far as the run asked for, once
+    per package and process and never on a worker.
 
     The controller imports the conftests before it starts any worker, so building there
     leaves the interfaces on disk by the time a worker imports a mapped datastructure.
-    Letting the workers build too would set several processes writing the same files at
-    once, each paying for the whole build again. A run covering several packages asks
-    once per package, and every generator runs in the first of those calls.
 
+    :param package_name: The package whose tests run.
     :return: Whether this call built them.
     """
     if os.environ.get(PytestEnvironmentVariable.XDIST_WORKER):
         return False
-    if not OrmBuild.requested().builds(WORKSPACE_ORM_INTERFACES):
+    needed_interfaces = WORKSPACE_ORM_INTERFACES.interfaces_needed_by_package(
+        package_name
+    )
+    if not OrmBuild.requested().builds(needed_interfaces):
         return False
-    WORKSPACE_ORM_INTERFACES.regenerate()
+    needed_interfaces.regenerate()
     return True

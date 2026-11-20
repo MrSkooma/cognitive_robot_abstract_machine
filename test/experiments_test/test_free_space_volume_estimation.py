@@ -8,7 +8,7 @@ from experiments.free_space_volume_estimation import (
     ObstacleContainmentChecker,
 )
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
-from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import FixedConnection
 from semantic_digital_twin.world_description.geometry import (
@@ -39,7 +39,9 @@ def _world_with_box_obstacle(scale: Scale) -> tuple[World, Shape]:
         root = Body(name=PrefixedName("map"))
         world.add_kinematic_structure_entity(root)
         obstacle = Body(name=PrefixedName("obstacle"))
-        world.add_connection(FixedConnection.create_with_dofs(world, root, obstacle))
+        world.add_connection(
+            FixedConnection.create_with_dofs(world=world, parent=root, child=obstacle)
+        )
         obstacle.collision.append(Box(scale=scale))
     return world, obstacle.collision.shapes[0]
 
@@ -78,7 +80,9 @@ def test_non_watertight_mesh_is_convex_decomposed_instead_of_using_its_bounding_
         root = Body(name=PrefixedName("map"))
         world.add_kinematic_structure_entity(root)
         obstacle = Body(name=PrefixedName("ring"))
-        world.add_connection(FixedConnection.create_with_dofs(world, root, obstacle))
+        world.add_connection(
+            FixedConnection.create_with_dofs(world=world, parent=root, child=obstacle)
+        )
         obstacle.collision.append(
             Mesh.from_trimesh(
                 mesh=_non_watertight_ring_mesh(), directory=tmp_path, file_type="stl"
@@ -110,7 +114,9 @@ def test_decomposition_yielding_no_pieces_falls_back_to_the_bounding_box(tmp_pat
         root = Body(name=PrefixedName("map"))
         world.add_kinematic_structure_entity(root)
         obstacle = Body(name=PrefixedName("ring"))
-        world.add_connection(FixedConnection.create_with_dofs(world, root, obstacle))
+        world.add_connection(
+            FixedConnection.create_with_dofs(world=world, parent=root, child=obstacle)
+        )
         obstacle.collision.append(
             Mesh.from_trimesh(
                 mesh=_non_watertight_ring_mesh(), directory=tmp_path, file_type="stl"

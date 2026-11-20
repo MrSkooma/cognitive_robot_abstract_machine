@@ -19,11 +19,10 @@ from semantic_digital_twin.adapters.multi_sim import (
     MujocoConnectionJoints,
     MujocoDifferentialDriveJoints,
     MujocoSim,
+    SimulatorModelNames,
 )
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
-from semantic_digital_twin.spatial_types.spatial_types import (
-    HomogeneousTransformationMatrix,
-)
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connection_properties import (
     VelocityServoGains,
@@ -53,7 +52,7 @@ def _servoed_rover(start_yaw: float = 0.0) -> DifferentialDrive:
         world.add_kinematic_structure_entity(odom)
         world.add_kinematic_structure_entity(base)
         drive = DifferentialDrive.create_with_dofs(
-            world, odom, base, name=PrefixedName("drive", "rover")
+            world=world, parent=odom, child=base, name=PrefixedName("drive", "rover")
         )
         world.add_connection(drive)
         for degree_of_freedom in drive.active_dofs:
@@ -128,9 +127,9 @@ def _drive_at(
 
 
 def test_a_differential_drive_is_built_by_its_own_realisation(rover):
-    assert type(MujocoConnectionJoints.of(rover, rover._world)) is (
-        MujocoDifferentialDriveJoints
-    )
+    realisation = MujocoConnectionJoints.of(rover, rover._world, SimulatorModelNames())
+
+    assert type(realisation) is MujocoDifferentialDriveJoints
 
 
 def test_the_compiled_model_moves_the_base_along_x_and_y_and_about_z(rover, tmp_path):

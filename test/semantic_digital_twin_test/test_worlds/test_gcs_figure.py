@@ -16,10 +16,8 @@ from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.semantic_annotations.semantic_annotations import (
     SemanticEnvironmentAnnotation,
 )
-from semantic_digital_twin.spatial_types import Point3
-from semantic_digital_twin.spatial_types.spatial_types import (
-    HomogeneousTransformationMatrix,
-)
+from krrood_spatial_math.spatial_types import Point3
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import FixedConnection
 from semantic_digital_twin.world_description.geometry import (
@@ -96,9 +94,9 @@ def add_box_body(world: World, name: str, scale: Scale, x: float, y: float) -> B
     body = Body(name=PrefixedName(name))
     world.add_connection(
         FixedConnection.create_with_dofs(
-            world,
-            world.root,
-            body,
+            world=world,
+            parent=world.root,
+            child=body,
             parent_T_connection_expression=HomogeneousTransformationMatrix.from_xyz_rpy(
                 x, y, ROOM_HEIGHT / 2, reference_frame=world.root
             ),

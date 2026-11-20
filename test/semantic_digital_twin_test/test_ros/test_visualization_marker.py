@@ -2,10 +2,11 @@ import os
 from dataclasses import dataclass, field
 from time import sleep
 
+import numpy as np
 import pytest
+import trimesh
 from rclpy.duration import Duration
 from rclpy.time import Time
-from typing_extensions import List, Set, Tuple
 from visualization_msgs.msg import MarkerArray, Marker
 
 from .test_tf_publisher import publisher_ignoring_existing_frames
@@ -13,12 +14,13 @@ from semantic_digital_twin.adapters.mesh import STLParser
 from semantic_digital_twin.adapters.ros.tf_publisher import TFPublisher
 from semantic_digital_twin.adapters.ros.tfwrapper import TFWrapper
 from semantic_digital_twin.adapters.ros.visualization.viz_marker import (
+    RvizLoadableMeshes,
     VizMarkerPublisher,
     ShapeSource,
 )
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.exceptions import WorldHasMultipleTfPublishersError
-from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
+from krrood_spatial_math.spatial_types import HomogeneousTransformationMatrix
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import (
     OmniDrive,
@@ -143,13 +145,16 @@ def test_visualization_marker_tracy(rclpy_node, tracy_world, ros_publishers):
     else:
         assert False, "Callback timed out"
 
-    # table has no texture, so white should be used
+    # table has no texture, so the color its URDF material gives it should be used
+    table = tracy_world.get_body_by_name("table")
+    table_color = table.visual.shapes[0].color
+    assert table_color != Color()
     for marker in callback.last_msg.markers:
-        if marker.ns == str(tracy_world.get_body_by_name("table").name):
-            assert marker.color.r == 1.0
-            assert marker.color.g == 1.0
-            assert marker.color.b == 1.0
-            assert marker.color.a == 1.0
+        if marker.ns == str(table.name):
+            assert marker.color.r == pytest.approx(table_color.R)
+            assert marker.color.g == pytest.approx(table_color.G)
+            assert marker.color.b == pytest.approx(table_color.B)
+            assert marker.color.a == pytest.approx(table_color.A)
             break
     else:
         assert False, "Marker not found"
@@ -170,7 +175,7 @@ def test_visualization_marker_regions_are_transparent(rclpy_node, cylinder_bot_w
     region = Region(
         name=PrefixedName("region"),
         area=ShapeCollection(
-            shapes=[Box(scale=Scale(0.1, 0.1, 0.1), color=Color(A=1.0))]
+            shapes=[Box(scale=Scale(0.1, 0.1, 0.1), color=Color.from_rgba(opacity=1.0))]
         ),
     )
     connection = FixedConnection(parent=cylinder_bot_world.root, child=region)
@@ -223,7 +228,7 @@ def test_trimesh(rclpy_node):
             "stl",
             "milk.stl",
         )
-    ).parse()
+    ).create_world()
     visual: Mesh = world.root.visual.shapes[0]
     world.root.visual.shapes[0] = visual
     with world.modify_world():
@@ -245,7 +250,7 @@ def test_trimesh(rclpy_node):
 # %% marker frames
 
 
-def world_with_visible_bodies(*names: str) -> Tuple[World, List[Body]]:
+def world_with_visible_bodies(*names: str) -> tuple[World, list[Body]]:
     """
     Build a world whose root carries one body with a visual shape per given name.
     """
@@ -265,17 +270,20 @@ def world_with_visible_bodies(*names: str) -> Tuple[World, List[Body]]:
     return world, bodies
 
 
-def published_child_frames(tf_publisher: TFPublisher) -> Set[str]:
+def published_child_frames(tf_publisher: TFPublisher) -> set[str]:
     """
-    The tf frames the publisher broadcasts a transform for.
+    The tf frames the publisher broadcasts a transform for, on every state change or
+    once per model change.
     """
+    callback = tf_publisher.tf_model_callback
     return {
         transform.child_frame_id
-        for transform in tf_publisher.tf_model_callback.tf_message.transforms
+        for message in (callback.tf_message, callback.static_tf_message)
+        for transform in message.transforms
     }
 
 
-def marker_frames(viz: VizMarkerPublisher) -> Set[str]:
+def marker_frames(viz: VizMarkerPublisher) -> set[str]:
     """
     The tf frames the markers are positioned in.
     """
@@ -291,6 +299,22 @@ def test_markers_are_stamped_with_the_frame_names_the_tf_publisher_publishes(
     viz = VizMarkerPublisher(_world=world, node=rclpy_node)
 
     assert marker_frames(viz) == published_child_frames(tf_publisher)
+
+
+def test_markers_of_equally_named_bodies_do_not_replace_each_other(rclpy_node):
+    """
+    RViz identifies a marker by its namespace and id, so a marker sharing both with
+    another one replaces it.
+    """
+    world, bodies = world_with_visible_bodies("milk", "milk")
+
+    viz = VizMarkerPublisher(_world=world, node=rclpy_node)
+
+    assert sorted((marker.ns, marker.id) for marker in viz.markers.markers) == sorted(
+        (viz.tf_publisher.tf_model_callback.frame_names.assign(body), shape_index)
+        for body in bodies
+        for shape_index, _ in enumerate(body.visual.shapes)
+    )
 
 
 def test_the_tf_publisher_of_the_world_is_adopted(rclpy_node):
@@ -431,3 +455,152 @@ def test_stopping_the_marker_publisher_keeps_the_tf_publisher_it_was_given(rclpy
     viz.stop()
 
     assert TFPublisher.all_callbacks_of_this_type_from_world(world) == [tf_publisher]
+
+
+# %% meshes RViz cannot load as they are
+
+
+def flat_grid(*, side: int) -> trimesh.Trimesh:
+    """
+    :param side: The number of vertices along each side of the grid.
+    :return: A flat square grid of ``side`` x ``side`` vertices and two triangles per
+        cell.
+    """
+    x, y = np.meshgrid(np.arange(side), np.arange(side))
+    vertices = np.column_stack([x.ravel(), y.ravel(), np.zeros(side * side)])
+    corners = (np.arange(side - 1)[:, None] * side + np.arange(side - 1)).ravel()
+    faces = np.concatenate(
+        [
+            np.column_stack([corners, corners + 1, corners + side + 1]),
+            np.column_stack([corners, corners + side + 1, corners + side]),
+        ]
+    )
+    return trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+
+def world_showing(mesh: Mesh) -> World:
+    """
+    :param mesh: The mesh to show.
+    :return: A world whose only body has ``mesh`` as its visual shape.
+    """
+    world = World()
+    with world.modify_world():
+        world.add_body(
+            Body(name=PrefixedName("grid"), visual=ShapeCollection(shapes=[mesh]))
+        )
+    return world
+
+
+def mesh_markers(viz: VizMarkerPublisher) -> list[Marker]:
+    """
+    :return: The markers of the publisher that show a mesh file.
+    """
+    return [
+        marker for marker in viz.markers.markers if marker.type == Marker.MESH_RESOURCE
+    ]
+
+
+def marker_face_count(marker: Marker) -> int:
+    """
+    :return: The number of faces of the mesh file the marker shows.
+    """
+    mesh_file = marker.mesh_resource.removeprefix("file://")
+    return len(trimesh.load(mesh_file, force="mesh", process=False).faces)
+
+
+@pytest.fixture
+def grid_too_large_for_rviz() -> Mesh:
+    """
+    A flat grid of 183 x 183 vertices and 66248 faces: few enough vertices for RViz to
+    count its faces with 16 bits, but more faces than that.
+    """
+    return Mesh.from_trimesh(mesh=flat_grid(side=183))
+
+
+def test_no_marker_mesh_has_more_faces_than_rviz_counts_with_16_bits(
+    rclpy_node, grid_too_large_for_rviz
+):
+    """
+    RViz crashes on a mesh with fewer than 65536 vertices and more faces than it counts
+    with 16 bits, so such a mesh reaches it in parts.
+    """
+    viz = VizMarkerPublisher(
+        _world=world_showing(grid_too_large_for_rviz), node=rclpy_node
+    )
+
+    face_counts = [marker_face_count(marker) for marker in mesh_markers(viz)]
+    assert max(face_counts) <= RvizLoadableMeshes.largest_16_bit_count
+
+
+def test_the_parts_of_a_split_mesh_show_all_of_its_faces(
+    rclpy_node, grid_too_large_for_rviz
+):
+    """
+    Splitting a mesh for RViz loses no face.
+    """
+    viz = VizMarkerPublisher(
+        _world=world_showing(grid_too_large_for_rviz), node=rclpy_node
+    )
+
+    face_counts = [marker_face_count(marker) for marker in mesh_markers(viz)]
+    assert sum(face_counts) == len(grid_too_large_for_rviz.unscaled_mesh.faces)
+
+
+def test_the_parts_of_a_split_mesh_keep_its_color_and_origin(
+    rclpy_node, grid_too_large_for_rviz
+):
+    """
+    Each part is shown in the color and at the origin of the mesh it was split from.
+    """
+    grid_too_large_for_rviz.color = Color(hue=0.5, saturation=1.0)
+    grid_too_large_for_rviz.origin = HomogeneousTransformationMatrix.from_xyz_rpy(x=1.0)
+    viz = VizMarkerPublisher(
+        _world=world_showing(grid_too_large_for_rviz), node=rclpy_node
+    )
+
+    expected_color = grid_too_large_for_rviz.color.to_rgba()
+    for marker in mesh_markers(viz):
+        color = (marker.color.r, marker.color.g, marker.color.b, marker.color.a)
+        np.testing.assert_allclose(color, expected_color)
+        assert marker.pose.position.x == pytest.approx(1.0)
+
+
+def test_a_mesh_rviz_loads_is_shown_as_it_is(rclpy_node):
+    """
+    A mesh with no more faces than RViz counts with 16 bits keeps its own file.
+    """
+    mesh = Mesh.from_trimesh(mesh=flat_grid(side=10))
+    viz = VizMarkerPublisher(_world=world_showing(mesh), node=rclpy_node)
+
+    [marker] = mesh_markers(viz)
+    assert marker.mesh_resource == "file://" + str(mesh.local_file)
+
+
+def test_a_mesh_whose_file_stores_too_many_vertices_for_16_bits_is_shown_as_it_is(
+    rclpy_node,
+):
+    """
+    RViz counts the faces of a mesh whose file stores more vertices than 16 bits count
+    with 32 bits, so it keeps its own file even where welding would leave fewer.
+    """
+    grid = flat_grid(side=183)
+    grid.unmerge_vertices()
+    mesh = Mesh.from_trimesh(mesh=grid)
+    viz = VizMarkerPublisher(_world=world_showing(mesh), node=rclpy_node)
+
+    [marker] = mesh_markers(viz)
+    assert marker.mesh_resource == "file://" + str(mesh.local_file)
+
+
+def test_a_split_mesh_is_split_only_once(rclpy_node, grid_too_large_for_rviz):
+    """
+    Every model change reuses the parts of a mesh that was split before.
+    """
+    viz = VizMarkerPublisher(
+        _world=world_showing(grid_too_large_for_rviz), node=rclpy_node
+    )
+    resources = [marker.mesh_resource for marker in mesh_markers(viz)]
+
+    viz.notify_model_change()
+
+    assert [marker.mesh_resource for marker in mesh_markers(viz)] == resources

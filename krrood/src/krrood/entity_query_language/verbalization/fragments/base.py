@@ -1,15 +1,13 @@
+"""
+The fragment tree a verbalization is built as: its leaves, its structural nodes, and
+the folds and maps over it.
+"""
+
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field, replace
-from typing_extensions import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    List,
-    Optional,
-    TypeVar,
-)
+from typing_extensions import TYPE_CHECKING, Any, Callable, TypeVar
 
 from krrood.entity_query_language.core.base_expressions import (
     Selectable,
@@ -41,7 +39,7 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
-@dataclass
+@dataclass(kw_only=True)
 class VerbalizationFragment:
     """
     Abstract base for all verbalized output fragments.
@@ -50,7 +48,7 @@ class VerbalizationFragment:
     composition (``PhraseFragment``), and block structure (``BlockFragment``).
     """
 
-    source: Optional[FoldNode] = field(
+    source: FoldNode | None = field(
         default=None, kw_only=True, compare=False, repr=False
     )
     """The EQL node (or synthetic coordination artifact) this fragment was built from, recorded so a
@@ -64,7 +62,7 @@ class VerbalizationFragment:
         return self
 
 
-@dataclass
+@dataclass(kw_only=True)
 class HasText:
     """Mixin contributing the display ``text`` field shared by text-bearing fragments."""
 
@@ -72,7 +70,7 @@ class HasText:
     """The display text as a string (e.g. ``"the"``, ``"Robot"``)."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class HasNumber:
     """Mixin contributing the grammatical ``number`` field shared by fragments whose own
     surface text is inflected for number."""
@@ -81,7 +79,7 @@ class HasNumber:
     """Grammatical number of this fragment's surface text."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class HasPolarity:
     """Mixin contributing the grammatical ``negated`` field shared by fragments whose surface is
     realised in the negative (a verb with do-support, a copula with its negative suppletion).
@@ -92,7 +90,7 @@ class HasPolarity:
     *"does not <lemma>"* and a copula into *"is not"*. Affirmative by default."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class WordFragment(HasText, HasNumber, VerbalizationFragment):
     """
     Plain neutral text with no semantic role: articles, connectives, punctuation.
@@ -105,7 +103,7 @@ class WordFragment(HasText, HasNumber, VerbalizationFragment):
     """Orthographic spacing of this token relative to its neighbours."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
     """
     Text carrying a semantic role — drives colour markup and optional source hyperlinking.
@@ -114,12 +112,13 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
     role: SemanticRole
     """Semantic role that determines this token's colour markup."""
 
-    source_reference: Optional[SourceReference] = None
+    source_reference: SourceReference | None = None
     """Optional reference to the Python class or attribute this fragment represents."""
 
     @classmethod
     def for_variable(
         cls,
+        *,
         label: str,
         expression: SymbolicExpression,
         number: GrammaticalNumber = GrammaticalNumber.SINGULAR,
@@ -132,14 +131,14 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
         :param number: Grammatical-number feature.
         :return: A fragment with the ``VARIABLE`` role.
 
-        >>> RoleFragment.for_variable("Robot", variable(Robot, [])).text
+        >>> RoleFragment.for_variable(label="Robot", expression=variable(Robot, [])).text
         'Robot'
         """
         return cls(
             text=label,
             role=SemanticRole.VARIABLE,
             source_reference=SourceReference.for_type(
-                expression._type_ if isinstance(expression, Selectable) else None
+                type_=expression._type_ if isinstance(expression, Selectable) else None
             ),
             number=number,
         )
@@ -147,11 +146,11 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
     @classmethod
     def for_attribute(
         cls,
-        owner: Optional[type],
+        *,
+        owner: type | None,
         attribute_name: str,
         number: GrammaticalNumber = GrammaticalNumber.SINGULAR,
-        *,
-        text: Optional[str] = None,
+        text: str | None = None,
     ) -> RoleFragment:
         """
         Build a fragment for an attribute access, linked to its owner class.
@@ -167,17 +166,21 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
             (*"assigned to"*); defaults to the field's registered display name, else *attribute_name*.
         :return: A fragment with the ``ATTRIBUTE`` role.
 
-        >>> RoleFragment.for_attribute(Robot, "battery").text
+        >>> RoleFragment.for_attribute(owner=Robot, attribute_name="battery").text
         'battery'
         """
         surface_text = (
-            text if text is not None else cls._display_name(owner, attribute_name)
+            text
+            if text is not None
+            else cls._display_name(owner=owner, attribute_name=attribute_name)
         )
         return cls(
             text=surface_text,
             role=SemanticRole.ATTRIBUTE,
             source_reference=(
-                SourceReference.for_attribute(owner, attribute_name)
+                SourceReference.for_attribute(
+                    owner=owner, attribute_name=attribute_name
+                )
                 if owner is not None
                 else None
             ),
@@ -185,12 +188,14 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
         )
 
     @staticmethod
-    def _display_name(owner: Optional[type], attribute_name: str) -> str:
+    def _display_name(*, owner: type | None, attribute_name: str) -> str:
         """:return: the field's registered display name when *owner* declares one for
         *attribute_name*, else *attribute_name* unchanged."""
         if owner is None:
             return attribute_name
-        grammar_metadata = GrammarMetadata.of_field(owner, attribute_name)
+        grammar_metadata = GrammarMetadata.of_field(
+            clazz=owner, field_name=attribute_name
+        )
         if grammar_metadata is None or grammar_metadata.display_name is None:
             return attribute_name
         return grammar_metadata.display_name
@@ -198,10 +203,10 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
     @classmethod
     def for_type(
         cls,
+        *,
         type_: Any,
         number: GrammaticalNumber = GrammaticalNumber.SINGULAR,
-        *,
-        text: Optional[str] = None,
+        text: str | None = None,
     ) -> RoleFragment:
         """
         Build a fragment for a type rendered as a noun (*"Robot"*), with the ``VARIABLE`` role.
@@ -212,7 +217,7 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
         :param text: Surface word override; defaults to the class ``__name__``.
         :return: A fragment with the ``VARIABLE`` role.
 
-        >>> RoleFragment.for_type(Robot).text
+        >>> RoleFragment.for_type(type_=Robot).text
         'Robot'
         """
         is_class = isinstance(type_, type)
@@ -223,12 +228,14 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
                 else (type_noun(type_) if is_class else str(type_))
             ),
             role=SemanticRole.VARIABLE,
-            source_reference=SourceReference.for_type(type_) if is_class else None,
+            source_reference=SourceReference.for_type(type_=type_)
+            if is_class
+            else None,
             number=number,
         )
 
     @classmethod
-    def for_literal(cls, value: Any) -> RoleFragment:
+    def for_literal(cls, *, value: Any) -> RoleFragment:
         """
         Build a fragment for a literal value (*42*, *"hello"*, an enum member), with the ``LITERAL``
         role; the surface text is the shared value lexicalisation.
@@ -236,13 +243,13 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
         :param value: The Python value to render.
         :return: A fragment with the ``LITERAL`` role.
 
-        >>> RoleFragment.for_literal(42).text
+        >>> RoleFragment.for_literal(value=42).text
         '42'
         """
         return cls(text=value_phrase(value), role=SemanticRole.LITERAL)
 
     @classmethod
-    def for_value(cls, value: Any) -> RoleFragment:
+    def for_value(cls, *, value: Any) -> RoleFragment:
         """Render an arbitrary Python value to a fragment, picking the right kind automatically: a
         class becomes a source-linked type reference (:meth:`for_type`, *"Robot"* linked to its
         definition), anything else a plain literal (:meth:`for_literal`, *"42"*).
@@ -253,30 +260,93 @@ class RoleFragment(HasText, HasNumber, HasPolarity, VerbalizationFragment):
         :class:`~…vocabulary.parts_of_speech.OneOf`). Prefer :meth:`for_literal` directly when the
         value is always a literal.
 
-        >>> RoleFragment.for_value(int).text
+        >>> RoleFragment.for_value(value=int).text
         'Integer'
-        >>> RoleFragment.for_value(42).text
+        >>> RoleFragment.for_value(value=42).text
         '42'
         """
         return (
-            cls.for_type(value) if isinstance(value, type) else cls.for_literal(value)
+            cls.for_type(type_=value)
+            if isinstance(value, type)
+            else cls.for_literal(value=value)
         )
 
     @classmethod
-    def for_operator(cls, label: str) -> RoleFragment:
+    def for_operator(cls, *, label: str) -> RoleFragment:
         """
         Build a fragment for an operator or copula (no source link).
 
         :param label: Display text (e.g. ``"is"``, ``"not"``, ``"greater than"``).
         :return: A fragment with the ``OPERATOR`` role.
 
-        >>> RoleFragment.for_operator("greater than").text
+        >>> RoleFragment.for_operator(label="greater than").text
         'greater than'
         """
         return cls(text=label, role=SemanticRole.OPERATOR)
 
 
-@dataclass
+# %% leaves whose words the morphology pass decides
+
+
+@dataclass(kw_only=True)
+class IndefiniteArticle(WordFragment):
+    """
+    The indefinite article, whose surface the morphology pass makes agree with the sound
+    of the word after it (*"a Robot"*, *"an hour"*).
+    """
+
+
+@dataclass(kw_only=True)
+class VerbFormFragment(RoleFragment):
+    """
+    A ``VERB`` leaf whose text is any form of the verb (*"connects"*), as read off a name;
+    the morphology pass reduces it to its lemma before inflecting it like any verb leaf.
+    """
+
+    role: SemanticRole = SemanticRole.VERB
+    """
+    Always the verb role.
+    """
+
+
+@dataclass(kw_only=True)
+class CollectionElementNoun(RoleFragment):
+    """
+    A noun naming one element of a collection, whose text is the collection's name
+    (*"tasks"*); the morphology pass singularizes it (*"task"*) before realizing its number.
+    """
+
+
+@dataclass(kw_only=True)
+class CardinalNumber(VerbalizationFragment):
+    """
+    A count, realized by the morphology pass as its English cardinal word (*"seven"*).
+    """
+
+    count: int
+    """
+    The number counted.
+    """
+
+
+@dataclass(kw_only=True)
+class IndexOrdinal(VerbalizationFragment):
+    """
+    A position in a sequence, realized by the morphology pass as its English ordinal
+    phrase (*"first"*, *"last"*, *"second to last"*).
+    """
+
+    index: int
+    """
+    The position as a sequence index: counted from the start when non-negative, from the
+    end when negative.
+    """
+
+
+# %% structural fragments
+
+
+@dataclass(kw_only=True)
 class PhraseFragment(VerbalizationFragment):
     """An inline sequence of fragments joined by a separator."""
 
@@ -287,7 +357,7 @@ class PhraseFragment(VerbalizationFragment):
     """Separator inserted between adjacent parts."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Clause(PhraseFragment):
     """A subject-led predicate clause — *"<subject> <verb/copula> …"* — built from typed
     part-of-speech constituents.
@@ -300,7 +370,7 @@ class Clause(PhraseFragment):
     """
 
 
-@dataclass
+@dataclass(kw_only=True)
 class NounPhrase(HasNumber, VerbalizationFragment):
     """
     A noun-phrase specification (a determiner phrase) — the grammatical features of a noun
@@ -315,7 +385,7 @@ class NounPhrase(HasNumber, VerbalizationFragment):
     head: VerbalizationFragment
     """The noun leaf or sub-phrase the determiner attaches to."""
 
-    additional_heads: List[VerbalizationFragment] = field(default_factory=list)
+    additional_heads: list[VerbalizationFragment] = field(default_factory=list)
     """Further disjunctive alternatives to :attr:`head`, each joined with *"or"* and given its
     own indefinite article from its own phonology (*"a Body or a Region"*). Empty for an
     ordinary single-headed noun phrase."""
@@ -323,7 +393,7 @@ class NounPhrase(HasNumber, VerbalizationFragment):
     definiteness: Definiteness = Definiteness.INDEFINITE
     """Determiner-system feature — selects *"a/an"* / *"the"* / no determiner."""
 
-    modifiers: List[VerbalizationFragment] = field(default_factory=list)
+    modifiers: list[VerbalizationFragment] = field(default_factory=list)
     """Post-modifiers following the head (e.g. *"of the Root"*, *"where … such that …"*)."""
 
     modifier_separator: Separator = Separator.SPACE
@@ -331,7 +401,7 @@ class NounPhrase(HasNumber, VerbalizationFragment):
     :attr:`Separator.SPACE` (*"drawers of Cabinets"*); :attr:`Separator.NONE` lets an appositive
     clause attach without a spurious space (*"a Robot, where …"*)."""
 
-    referent_id: Optional[uuid.UUID] = None
+    referent_id: uuid.UUID | None = None
     """When set, this noun phrase is a referring expression for that entity, and its
     definiteness holds the first-mention form."""
 
@@ -341,7 +411,7 @@ class NounPhrase(HasNumber, VerbalizationFragment):
     for a quantity whose modifiers are a complement rooted elsewhere (*"the sum of the amount of its
     revenue"* — the complement keeps the outer subject, so it must not be re-scoped to the sum)."""
 
-    pre_head: Optional[VerbalizationFragment] = None
+    pre_head: VerbalizationFragment | None = None
     """A qualifier placed between the determiner and the head (*"the [first two] Robots"*), e.g. a
     ``limit`` ranking phrase. Pre-nominal, so distinct from the post-nominal :attr:`modifiers`."""
 
@@ -358,7 +428,7 @@ class NounPhrase(HasNumber, VerbalizationFragment):
     coreference reduction (:meth:`~…rendering.coreference_processor.CoreferenceProcessor._reduced`)
     — it is part of the referent's identity, not a descriptive qualifier."""
 
-    ordinal: Optional[int] = None
+    ordinal: int | None = None
     """When set, this noun phrase is one of ≥ 3 same-noun distinct referents, and the value is its
     position in the group, counting the first member as 1 — realised as an ordinal word in the
     pre-head slot (*"a second Robot"*, later *"the second Robot"*). Mutually exclusive with
@@ -366,7 +436,7 @@ class NounPhrase(HasNumber, VerbalizationFragment):
     survives coreference reduction."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class PossessiveChain(VerbalizationFragment):
     """
     A navigation chain whose pronominal-vs-possessive surface form is decided by coreference
@@ -374,23 +444,23 @@ class PossessiveChain(VerbalizationFragment):
     BankTransaction"*).
     """
 
-    parts: List[PathStep]
+    parts: list[PathStep]
     """The chain's navigation path (:class:`PathStep` hops), innermost-last."""
 
     root_fragment: VerbalizationFragment
     """The referring noun phrase for the chain root."""
 
-    root_referent_id: Optional[uuid.UUID] = None
+    root_referent_id: uuid.UUID | None = None
     """The root variable's referent id — the chain pronominalises only when this is the current
     subject (and the root is not a numbered label)."""
 
-    node_id: Optional[uuid.UUID] = None
+    node_id: uuid.UUID | None = None
     """The chain's own terminal node id. When the chain is a query's selected / measured quantity,
     a later mention of that same quantity (a WHERE on the very attribute being aggregated) reduces
     to a bare *"the <attribute>"* instead of repeating the whole possessive."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class OwnedAttributes(VerbalizationFragment):
     """One or more attributes bound to an owner, whose possessive-vs-genitive surface coreference
     decides — *"its x, y, and z"* when the owner is the current discourse subject, else the genitive
@@ -404,24 +474,24 @@ class OwnedAttributes(VerbalizationFragment):
     """The referring phrase for the owner, rendered by the normal recursion; used in the genitive
     (non-subject) branch (*"… of the position"* / *"… of its position"*)."""
 
-    owner_referent_id: Optional[uuid.UUID] = None
+    owner_referent_id: uuid.UUID | None = None
     """The owner's referent id — the surface pronominalises only when this is the current subject
     (and the owner is not a numbered label)."""
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BlockFragment(VerbalizationFragment):
     """
     A named structural block with an optional header and a list of sub-items.
     """
 
-    header: Optional[VerbalizationFragment]
+    header: VerbalizationFragment | None
     """Optional lead fragment (e.g. ``"Find Robot"`` or ``"If"``)."""
 
     items: list[VerbalizationFragment] = field(default_factory=list)
     """Ordered list of sub-item fragments."""
 
-    conjunction: Optional[VerbalizationFragment] = None
+    conjunction: VerbalizationFragment | None = None
     """When set, the items are coordinated by this conjunction: paragraph rendering joins them
     Oxford-style (*"a, b, and c"*) and hierarchical rendering prefixes the last bullet with it
     (*"… and c"*). ``None`` ⇒ the items are an uncoordinated list (comma-joined / plain bullets)."""
@@ -439,8 +509,8 @@ def fold_fragment(
     fragment: VerbalizationFragment,
     *,
     word: Callable[[str], _T],
-    role: Callable[[str, SemanticRole, Optional[SourceReference]], _T],
-    phrase: Callable[[List[_T], str], _T],
+    role: Callable[[str, SemanticRole, SourceReference | None], _T],
+    phrase: Callable[[list[_T], str], _T],
     block: Callable[[BlockFragment], _T],
 ) -> _T:
     """
@@ -466,7 +536,7 @@ def fold_fragment(
     :param block: Handler for a raw ``BlockFragment`` (controls its own recursion).
     :return: The folded value.
 
-    >>> phrase = PhraseFragment(parts=[RoleFragment.for_operator("is"), RoleFragment.for_literal(42)])
+    >>> phrase = PhraseFragment(parts=[RoleFragment.for_operator(label="is"), RoleFragment.for_literal(value=42)])
     >>> fold_fragment(phrase, word=lambda text: [text], role=lambda text, role, ref: [text],
     ...               phrase=lambda parts, separator: [w for part in parts for w in part],
     ...               block=lambda block: [])
@@ -495,7 +565,7 @@ def fold_fragment(
 def map_structural_children(
     fragment: VerbalizationFragment,
     recurse: Callable[[VerbalizationFragment], VerbalizationFragment],
-) -> Optional[VerbalizationFragment]:
+) -> VerbalizationFragment | None:
     """
     Rebuild a structural container (``PhraseFragment``, ``BlockFragment`` — the nodes that merely
     hold children) by applying *recurse* to each child, or return ``None`` for anything else (a
@@ -505,7 +575,7 @@ def map_structural_children(
     :param recurse: Transform applied to each child.
     :return: The rebuilt container, or ``None`` when *fragment* is not a structural container.
 
-    >>> map_structural_children(RoleFragment.for_operator("is"), lambda f: f) is None
+    >>> map_structural_children(RoleFragment.for_operator(label="is"), lambda f: f) is None
     True
     """
     match fragment:
@@ -536,8 +606,8 @@ def map_fragment(
     :param leaf: Transform applied to each leaf fragment (identity for unaffected leaves).
     :return: The rebuilt tree.
 
-    >>> phrase = PhraseFragment(parts=[RoleFragment.for_operator("is"), RoleFragment.for_literal(42)])
-    >>> shouted = map_fragment(phrase, lambda leaf: RoleFragment.for_operator(leaf.text.upper()))
+    >>> phrase = PhraseFragment(parts=[RoleFragment.for_operator(label="is"), RoleFragment.for_literal(value=42)])
+    >>> shouted = map_fragment(phrase, lambda leaf: RoleFragment.for_operator(label=leaf.text.upper()))
     >>> flatten_fragment_to_plain_text(shouted)
     'IS 42'
     """
@@ -556,7 +626,7 @@ def flatten_fragment_to_plain_text(fragment: VerbalizationFragment) -> str:
     :return: Plain-text representation with spaces between tokens.
 
     >>> flatten_fragment_to_plain_text(
-    ...     PhraseFragment(parts=[RoleFragment.for_operator("is"), RoleFragment.for_literal(42)]))
+    ...     PhraseFragment(parts=[RoleFragment.for_operator(label="is"), RoleFragment.for_literal(value=42)]))
     'is 42'
     """
 
@@ -599,10 +669,10 @@ def oxford_comma(
         three or more, so a pair takes none); pass ``True`` only to join two independent clauses.
     :return: A single fragment representing the joined sequence.
 
-    >>> words = [RoleFragment.for_operator(w) for w in ("a", "b", "c")]
-    >>> flatten_fragment_to_plain_text(oxford_comma(words, RoleFragment.for_operator("and")))
+    >>> words = [RoleFragment.for_operator(label=w) for w in ("a", "b", "c")]
+    >>> flatten_fragment_to_plain_text(oxford_comma(words, RoleFragment.for_operator(label="and")))
     'a, b, and c'
-    >>> flatten_fragment_to_plain_text(oxford_comma(words[:2], RoleFragment.for_operator("and")))
+    >>> flatten_fragment_to_plain_text(oxford_comma(words[:2], RoleFragment.for_operator(label="and")))
     'a and b'
     """
     if not parts:
@@ -647,7 +717,7 @@ def apply_subject_verb_agreement(
     ... )
     >>> leaf = RoleFragment(text="is", role=SemanticRole.OPERATOR)
     >>> plural_leaf = apply_subject_verb_agreement(leaf, GrammaticalNumber.PLURAL)
-    >>> MorphologyProcessor().rewrite(plural_leaf).text
+    >>> MorphologyProcessor().rewrite(leaf=plural_leaf).text
     'are'
 
     :param part: A clause constituent, checked for the predicate-word shape.

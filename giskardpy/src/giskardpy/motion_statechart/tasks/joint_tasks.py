@@ -1,59 +1,50 @@
+"""
+Tasks that act on joints directly: moving them to goal positions and limiting their
+velocity.
+"""
+
 from __future__ import annotations
 
-from dataclasses import field, dataclass
-from typing_extensions import List
+from dataclasses import dataclass
 
 import krrood.symbolic_math.symbolic_math as sm
-from giskardpy.motion_statechart.context import MotionStatechartContext
-from giskardpy.motion_statechart.data_types import DefaultWeights
+from giskardpy.motion_statechart.weights import DefaultWeights, VelocityScale
 from giskardpy.motion_statechart.exceptions import EmptyGoalStateError
-from giskardpy.motion_statechart.graph_node import NodeArtifacts, Task
+from giskardpy.motion_statechart.graph_node import MotionNodeArtifacts, Task
 from giskardpy.motion_statechart.graph_node import ConvergingTask
+from giskardpy.motion_statechart.mixins import (
+    HasCruiseVelocityParameter,
+    HasMaxJointVelocityParameter,
+    HasGoalStateParameter,
+)
 from semantic_digital_twin.datastructures.joint_state import JointState
-from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
-from semantic_digital_twin.spatial_types.derivatives import Derivatives
 from semantic_digital_twin.world_description.connections import (
     RevoluteConnection,
-    ActiveConnection,
-    PrismaticConnection,
     ActiveConnection1DOF,
 )
 
 
-@dataclass(eq=False, repr=False)
-class JointPositionList(ConvergingTask):
+@dataclass(eq=False, repr=False, kw_only=True)
+class JointPositionList(
+    ConvergingTask, HasGoalStateParameter, HasCruiseVelocityParameter
+):
     """
     Moves the robot to a given joint position.
+
+    Its error is the largest joint position error, in rad or m.
     """
 
-    goal_state: JointState = field(kw_only=True)
+    cruise_velocity: float = 2.0
     """
-    The goal joint state.
+    How fast the joints approach the goal, in rad/s or m/s; not strictly enforced.
+
+    A joint never moves faster than its velocity limit.
     """
 
-    threshold: float = field(default=0.01, kw_only=True)
-    """
-    If all joint position errors are smaller than this threshold, the task's observation
-    state is true.
-    """
-
-    weight: float = field(
-        default=DefaultWeights.WEIGHT_BELOW_COLLISION_AVOIDANCE, kw_only=True
-    )
-    """
-    The weight of this task.
-    """
-
-    max_velocity: float = field(default=1.0, kw_only=True)
-    """
-    The maximum velocity of the joints.
-    """
-
-    def build_artifacts(self, context: MotionStatechartContext) -> NodeArtifacts:
+    def build_artifacts(self) -> MotionNodeArtifacts:
         """
         Build one equality constraint per joint of the goal state.
 
-        :param context: Provides access to world model and kinematic expressions.
         :return: The artifacts of this task, whose error is the largest absolute joint
             position error, so the task succeeds only once every joint is within the
             threshold.
@@ -61,12 +52,11 @@ class JointPositionList(ConvergingTask):
         if len(self.goal_state) == 0:
             raise EmptyGoalStateError(node=self)
 
-        artifacts = NodeArtifacts()
+        artifacts = MotionNodeArtifacts()
         errors = []
         for connection, target in self.goal_state.items():
             current = connection.dof.variables.position
-            target = self.apply_limits_to_target(target, connection)
-            velocity = self.apply_limits_to_velocity(self.max_velocity, connection)
+            target = self.apply_limits_to_target(target=target, connection=connection)
             if (
                 isinstance(connection, RevoluteConnection)
                 and not connection.dof.has_position_limits()
@@ -76,7 +66,10 @@ class JointPositionList(ConvergingTask):
                 error = target - current
             artifacts.constraints.add_equality_constraint(
                 name=str(connection.name),
-                reference_velocity=velocity,
+                cruise_velocity=self.cruise_velocity,
+                velocity_scale=min(
+                    connection.dof.limits.upper.velocity, VelocityScale.JOINT
+                ),
                 equality_bound=error,
                 quadratic_weight=self.weight,
                 task_expression=current,
@@ -86,7 +79,7 @@ class JointPositionList(ConvergingTask):
         return artifacts
 
     def apply_limits_to_target(
-        self, target: float, connection: ActiveConnection1DOF
+        self, *, target: float, connection: ActiveConnection1DOF
     ) -> sm.Scalar:
         ul_pos = connection.dof.limits.upper.position
         ll_pos = connection.dof.limits.lower.position
@@ -94,64 +87,53 @@ class JointPositionList(ConvergingTask):
             target = sm.limit(target, ll_pos, ul_pos)
         return target
 
-    def apply_limits_to_velocity(
-        self, velocity: float, connection: ActiveConnection1DOF
-    ) -> sm.Scalar:
-        ul_vel = connection.dof.limits.upper.velocity
-        ll_vel = connection.dof.limits.lower.velocity
-        return sm.limit(velocity, ll_vel, ul_vel)
 
-
-@dataclass(eq=False, repr=False)
-class JointVelocityLimit(Task):
+@dataclass(eq=False, repr=False, kw_only=True)
+class JointVelocityLimit(Task, HasMaxJointVelocityParameter):
     """
     Limits the velocity of a set of joints to a maximum value.
 
-    The joint-space equivalent of
-    :class:`~giskardpy.motion_statechart.tasks.cartesian_tasks.CartesianPositionVelocityLimit`:
-    enforcement is performed by adding a real inequality constraint to the optimizer
-    for each given joint, not by tuning a reference/normalization velocity.
+    Unlike a cruise velocity, which sets how fast a goal is approached, the limit holds
+    whatever moves the joints.
     """
 
-    connections: List[ActiveConnection1DOF] = field(kw_only=True)
+    connections: list[ActiveConnection1DOF]
     """
     The joints whose velocity is constrained.
     """
 
-    max_velocity: float = field(default=0.1, kw_only=True)
+    max_joint_velocity: float = 0.1
     """
-    Maximum allowed velocity (in rad/s or m/s, per joint).
+    Never None, as capping the joints is what this task is for.
     """
 
-    weight: float = field(
-        default=DefaultWeights.WEIGHT_ABOVE_COLLISION_AVOIDANCE, kw_only=True
-    )
+    weight: float = DefaultWeights.WEIGHT_ABOVE_COLLISION_AVOIDANCE
     """
     Optimization weight determining how strongly the velocity limit is enforced.
 
-    Defaults to the same weight as its Cartesian equivalents
-    (:class:`~giskardpy.motion_statechart.tasks.cartesian_tasks.CartesianPositionVelocityLimit`,
-    :class:`~giskardpy.motion_statechart.tasks.cartesian_tasks.CartesianRotationVelocityLimit`):
-    a velocity *limit* is a physical constraint like a joint limit, not a goal, so it
-    is weighted above collision avoidance rather than below it like goal tasks (e.g.
-    :class:`JointPositionList`).
+    A velocity limit is a physical constraint like a joint limit, so it is weighted
+    above collision avoidance, unlike goal tasks such as :class:`JointPositionList`.
     """
 
-    def build_artifacts(self, context: MotionStatechartContext) -> NodeArtifacts:
-        artifacts = NodeArtifacts()
+    def build_artifacts(self) -> MotionNodeArtifacts:
+        """
+        :return: Artifacts keeping the velocity of every connection within
+            :attr:`max_joint_velocity`, and observing whether all of them are.
+        """
+        artifacts = MotionNodeArtifacts()
         velocities = []
         for connection in self.connections:
             position = connection.dof.variables.position
             artifacts.constraints.add_velocity_constraint(
-                upper_velocity_limit=self.max_velocity,
-                lower_velocity_limit=-self.max_velocity,
+                upper_velocity_limit=self.max_joint_velocity,
+                lower_velocity_limit=-self.max_joint_velocity,
                 quadratic_weight=self.weight,
                 task_expression=position,
-                velocity_limit=self.max_velocity,
+                velocity_scale=connection.dof.limits.upper.velocity,
                 name=str(connection.name),
             )
             velocities.append(connection.dof.variables.velocity)
         artifacts.observation = sm.logic_all(
-            sm.abs(sm.Vector(velocities)) <= self.max_velocity
+            sm.abs(sm.Vector(velocities)) <= self.max_joint_velocity
         )
         return artifacts

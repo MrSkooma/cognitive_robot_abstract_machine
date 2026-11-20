@@ -1,3 +1,9 @@
+"""
+Tests of synchronizing worlds over ROS topics.
+"""
+
+from __future__ import annotations
+
 import hashlib
 import json
 import os
@@ -9,7 +15,7 @@ import uuid
 from dataclasses import dataclass, field
 from multiprocessing.synchronize import RLock
 from time import sleep
-from typing import Callable, Dict, Optional, Set, Tuple, List
+from typing_extensions import Dict, Optional, Set, Tuple, List
 from uuid import uuid4
 
 import numpy as np
@@ -22,11 +28,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from krrood.adapters.json_serializer import JSONAttributeDiff, to_json, from_json
+from krrood_synchronization.messages import MessageOrigin, Sender, StreamPosition
 from semantic_digital_twin.adapters.ros.messages import (
-    MetaData,
     WorldStateUpdate,
     LoadModel,
-    StreamPosition,
     WorldUpdate,
 )
 from semantic_digital_twin.adapters.ros.world_synchronizer import (
@@ -38,18 +43,19 @@ from semantic_digital_twin.adapters.ros.world_fetcher import FetchWorldServer
 from semantic_digital_twin.adapters.urdf import URDFParser
 from semantic_digital_twin.callbacks.callback import StateChangeCallback
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
+from semantic_digital_twin.adapters.ros.exceptions import (
+    WorldUpdateReferencesUnknownEntityError,
+)
 from semantic_digital_twin.exceptions import (
     MissingWorldModificationContextError,
     MismatchingPublishChangesAttribute,
     ApplyMissedMessagesWhileWorldIsBeingModifiedError,
     StateUpdateContainsUnknownDegreesOfFreedomError,
-    BrokenWorldModificationHistoryError,
+    PartiallyAppliedWorldModificationError,
     SynchronizerNotConnectedError,
     WorldHasMultipleSynchronizersError,
     WorldHasNoSynchronizerError,
-    WorldUpdateReferencesUnknownEntityError,
 )
-from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO
 from semantic_digital_twin.robots.pr2 import PR2
 from test.semantic_digital_twin_test.test_part_finding.test_splitting import (
     BODY_OUTER_RADIUS,
@@ -63,7 +69,10 @@ from semantic_digital_twin.semantic_annotations.semantic_annotations import (
     Fridge,
     Drawer,
 )
-from semantic_digital_twin.spatial_types import Vector3
+from krrood_spatial_math.spatial_types import (
+    HomogeneousTransformationMatrix,
+    Vector3,
+)
 from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import (
     Connection6DoF,
@@ -89,16 +98,14 @@ from semantic_digital_twin.adapters.world_entity_kwargs_tracker import (
     WorldEntityWithIDKwargsTracker,
 )
 from semantic_digital_twin.adapters.ros.messages import (
-    MetaData,
     WorldStateUpdate,
     ModificationBlock,
     LoadModel,
     WorldUpdate,
 )
-from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO
 
 
-def create_dummy_world(w: Optional[World] = None) -> World:
+def create_dummy_world(w: World | None = None) -> World:
     def deterministic_uuid(seed: str) -> uuid.UUID:
         h = hashlib.sha1(seed.encode()).hexdigest()[:32]
         return uuid.UUID(h)
@@ -152,7 +159,7 @@ def create_dummy_world(w: Optional[World] = None) -> World:
 
 def wait_for_sync_kse_and_return_ids(
     w1: World, w2: World, timeout: float = 5.0, interval: float = 0.05
-) -> Tuple[Set[uuid.UUID], Set[uuid.UUID]]:
+) -> tuple[set[uuid.UUID], set[uuid.UUID]]:
     """
     Waits until the sets of kinematic structure entity IDs in both worlds are identical,
     or until the timeout is reached.
@@ -288,6 +295,12 @@ def test_state_synchronization_world_model_change_after_init(rclpy_node):
 
 
 def test_model_reload(rclpy_node, in_memory_session_maker):
+    """
+    A world told to reload its model from the database ends up with the model of the
+    world that published the reload.
+    """
+    from semantic_digital_twin.orm.ormatic_interface import WorldMappingDAO
+
     session1 = in_memory_session_maker()
     session2 = in_memory_session_maker()
 
@@ -356,7 +369,7 @@ def test_a_reloaded_world_keeps_the_ones_listening_to_it(
 
         assert wait_for_condition(
             lambda: receiver_synchronizer.has_applied(
-                publisher_synchronizer.latest_published_position
+                position=publisher_synchronizer.latest_published_position
             )
         ), "the reload never reached the receiver"
         assert len(receiver_world.kinematic_structure_entities) == 3
@@ -383,7 +396,7 @@ class PublisherWithAppearingSubscribers:
     appear.
     """
 
-    subscriber_counts: List[int]
+    subscriber_counts: list[int]
     """
     What each look at the topic reports, the last entry from then on.
     """
@@ -400,7 +413,7 @@ class PublisherWithAppearingSubscribers:
 
 
 def connect_with_appearing_subscribers(
-    synchronizer: WorldSynchronizer, subscriber_counts: List[int]
+    synchronizer: WorldSynchronizer, subscriber_counts: list[int]
 ) -> timedelta:
     """
     Let a synchronizer connect against subscribers that appear as given.
@@ -440,9 +453,9 @@ def test_a_synchronizer_waits_until_no_further_subscriber_appears(rclpy_node):
             synchronizer, subscriber_counts=[1, 2]
         )
 
-        assert (
-            spent_connecting >= synchronizer.discovery_settle_time
-        ), "the synchronizer stopped waiting while subscribers were still appearing"
+        assert spent_connecting >= synchronizer.discovery_settle_time, (
+            "the synchronizer stopped waiting while subscribers were still appearing"
+        )
     finally:
         synchronizer.close()
 
@@ -497,7 +510,7 @@ def test_a_world_modified_right_after_its_synchronizer_was_created_is_published(
 
         assert wait_for_condition(
             lambda: receiver_synchronizer.has_applied(
-                publisher_synchronizer.latest_published_position
+                position=publisher_synchronizer.latest_published_position
             )
         ), "the first modification of the world never reached the receiver"
         assert receiver_world.get_kinematic_structure_entity_by_name(
@@ -598,7 +611,7 @@ def test_model_synchronization_merge_full_world_stress_test(rclpy_node):
             time.sleep(interval)
 
         raise RuntimeError(
-            f"World synchronization timed out after {i+1} attempts. bodylen: {len(body_hash_1)} vs {len(body_hash_2)}"
+            f"World synchronization timed out after {i + 1} attempts. bodylen: {len(body_hash_1)} vs {len(body_hash_2)}"
         )
 
     w1 = World(name="w1")
@@ -613,8 +626,7 @@ def test_model_synchronization_merge_full_world_stress_test(rclpy_node):
         _world=w2,
     )
     for i in range(10):
-
-        pr2_world = URDFParser.from_file(PR2.get_ros_file_path()).parse()
+        pr2_world = URDFParser.from_file(PR2.get_ros_file_path()).create_world()
 
         w1.merge_world(pr2_world)
         sleep(1)
@@ -628,12 +640,14 @@ def test_model_synchronization_merge_full_world_stress_test(rclpy_node):
 
     w1_connection_hashes = [hash(c) for c in w1.connections]
     w2_connection_hashes = [hash(c) for c in w2.connections]
-    assert (
-        w1_connection_hashes == w2_connection_hashes
-    ), f"w1: {[c.name for c in w1.connections]}, w2: {[c.name for c in w2.connections]}, If this feels flaky, contact @LucaKro"
+    assert w1_connection_hashes == w2_connection_hashes, (
+        f"w1: {[c.name for c in w1.connections]}, w2: {[c.name for c in w2.connections]}, If this feels flaky, contact @LucaKro"
+    )
     assert [d.id for d in w1.degrees_of_freedom] == [
         d.id for d in w2.degrees_of_freedom
-    ], f"w1: {[d.name for d in w1.degrees_of_freedom]}, w2: {[d.name for d in w2.degrees_of_freedom]}, If this feels flaky, contact @LucaKro"
+    ], (
+        f"w1: {[d.name for d in w1.degrees_of_freedom]}, w2: {[d.name for d in w2.degrees_of_freedom]}, If this feels flaky, contact @LucaKro"
+    )
 
     synchronizer_1.close()
     synchronizer_2.close()
@@ -661,7 +675,7 @@ def test_callback_pausing(rclpy_node):
         w1.add_connection(c)
 
     time.sleep(0.2)
-    assert len(ws2.missed_messages) == 2
+    assert len(ws2.missed_messages) == 1
     assert len(w1.kinematic_structure_entities) == 2
     assert len(w2.kinematic_structure_entities) == 0
     assert len(w1.connections) == 1
@@ -730,7 +744,6 @@ def test_ChangeDifHasHardwareInterface(rclpy_node):
     )
 
     try:
-
         with w1.modify_world():
             body1 = Body(name=PrefixedName("b1"))
             body2 = Body(name=PrefixedName("b2"))
@@ -872,7 +885,9 @@ def test_semantic_annotation_change_parameter_during_same_modification_block(
     time.sleep(1)
     assert [hash(sa) for sa in w1.semantic_annotations] == [
         hash(sa) for sa in w2.semantic_annotations
-    ], f"w1: {[sa.name for sa in w1.semantic_annotations]}, w2: {[sa.name for sa in w2.semantic_annotations]}"
+    ], (
+        f"w1: {[sa.name for sa in w1.semantic_annotations]}, w2: {[sa.name for sa in w2.semantic_annotations]}"
+    )
 
 
 def test_synchronize_6dof(rclpy_node):
@@ -977,7 +992,9 @@ def test_attribute_updates(rclpy_node):
     time.sleep(1)
     assert [hash(sa) for sa in world1.semantic_annotations] == [
         hash(sa) for sa in world2.semantic_annotations
-    ], f"{[sa.name for sa in world1.semantic_annotations]} vs {[sa.name for sa in world2.semantic_annotations]}"
+    ], (
+        f"{[sa.name for sa in world1.semantic_annotations]} vs {[sa.name for sa in world2.semantic_annotations]}"
+    )
 
     with world1.modify_world():
         fridge.add(door)
@@ -985,14 +1002,16 @@ def test_attribute_updates(rclpy_node):
     time.sleep(1)
     assert [hash(sa) for sa in world1.semantic_annotations] == [
         hash(sa) for sa in world2.semantic_annotations
-    ], f"{[sa.name for sa in world1.semantic_annotations]} vs {[sa.name for sa in world2.semantic_annotations]}"
+    ], (
+        f"{[sa.name for sa in world1.semantic_annotations]} vs {[sa.name for sa in world2.semantic_annotations]}"
+    )
 
 
 @dataclass(eq=False)
 class TestAnnotation(SemanticAnnotation):
     value: str = "default"
-    entity: Optional[Body] = None
-    entities: List[Body] = field(default_factory=list, hash=False)
+    entity: Body | None = None
+    entities: list[Body] = field(default_factory=list, hash=False)
 
     @synchronized_attribute_modification
     def update_value(self, new_value: str):
@@ -1237,7 +1256,7 @@ def test_nested_modify_world_publish_changes_true_false(rclpy_node):
 
     assert len(w1.kinematic_structure_entities) == len(w2.kinematic_structure_entities)
 
-    with pytest.raises(BrokenWorldModificationHistoryError):
+    with pytest.raises(PartiallyAppliedWorldModificationError):
         with w1.modify_world():
             handle = Handle.create_with_new_body_in_world("handle", w1)
 
@@ -1284,39 +1303,37 @@ def test_world_state_update_serialization_round_trip():
     """
     Verify that WorldStateUpdate survives a to_json/from_json round trip.
     """
-    meta = MetaData(node_name="test_node", process_id=42)
+    origin = MessageOrigin(sender=Sender(node_name="test_node", process_id=42))
     original = WorldStateUpdate(
-        meta_data=meta,
+        position=StreamPosition(origin=origin, sequence_number=3),
         ids=[uuid.uuid4(), uuid.uuid4()],
         states=[1.5, 2.5],
-        sequence_number=3,
     )
 
     serialized = to_json(original)
     restored = from_json(serialized)
 
     assert isinstance(restored, WorldStateUpdate)
-    assert restored.meta_data.node_name == original.meta_data.node_name
-    assert restored.meta_data.process_id == original.meta_data.process_id
+    assert restored.position == original.position
     assert restored.ids == original.ids
     assert restored.states == original.states
-    assert restored.sequence_number == 3
 
 
 def test_load_model_serialization_round_trip():
     """
     Verify that LoadModel survives a to_json/from_json round trip.
     """
-    meta = MetaData(node_name="loader", process_id=99)
-    original = LoadModel(meta_data=meta, primary_key=7, sequence_number=5)
+    origin = MessageOrigin(sender=Sender(node_name="loader", process_id=99))
+    original = LoadModel(
+        position=StreamPosition(origin=origin, sequence_number=5), primary_key=7
+    )
 
     serialized = to_json(original)
     restored = from_json(serialized)
 
     assert isinstance(restored, LoadModel)
     assert restored.primary_key == 7
-    assert restored.meta_data.node_name == "loader"
-    assert restored.sequence_number == 5
+    assert restored.position == original.position
 
 
 def test_simultaneous_state_and_model_updates(rclpy_node):
@@ -1641,18 +1658,20 @@ def test_world_update_serialization_round_trip():
     import json
 
     w = create_dummy_world()
-    meta = MetaData(node_name="test_node", process_id=1, world_id=w._id)
+    origin = MessageOrigin(
+        sender=Sender(node_name="test_node", process_id=1), model_id=w._id
+    )
     state_msg = WorldStateUpdate(
-        meta_data=meta,
+        position=StreamPosition(origin=origin),
         ids=list(w.state.keys())[:2],
         states=[0.1, 0.2],
     )
-    update = WorldUpdate(meta_data=meta, state_update=state_msg)
+    update = WorldUpdate(position=StreamPosition(origin=origin), state_update=state_msg)
 
     serialized = json.dumps(to_json(update))
     restored = from_json(json.loads(serialized))
 
-    assert restored.meta_data.node_name == update.meta_data.node_name
+    assert restored.position == update.position
     assert restored.modification_block is None
     assert restored.state_update is not None
     assert restored.state_update.states == [0.1, 0.2]
@@ -1801,12 +1820,12 @@ def test_stop_without_close_leaves_ros_resources_alive(rclpy_node):
 
     world_synchronizer.stop()
 
-    assert (
-        world_synchronizer.subscriber is not None
-    ), "subscriber must remain alive after stop() — only close() destroys ROS resources"
-    assert (
-        world_synchronizer.publisher is not None
-    ), "publisher must remain alive after stop() — only close() destroys ROS resources"
+    assert world_synchronizer.subscriber is not None, (
+        "subscriber must remain alive after stop() — only close() destroys ROS resources"
+    )
+    assert world_synchronizer.publisher is not None, (
+        "publisher must remain alive after stop() — only close() destroys ROS resources"
+    )
 
     world_synchronizer.close()
 
@@ -1877,9 +1896,9 @@ def test_apply_missed_messages_interleaved_model_and_state(rclpy_node):
 
     time.sleep(0.2)
 
-    assert (
-        len(world_synchronizer_2.missed_messages) == 3
-    ), "expected at least a model message and a state message to be buffered"
+    assert len(world_synchronizer_2.missed_messages) == 2, (
+        "expected a model message and a state message to be buffered"
+    )
     assert len(world_2.kinematic_structure_entities) == 0
 
     world_synchronizer_2.resume()
@@ -1911,7 +1930,7 @@ def test_apply_state_with_unknown_identifier_raises(rclpy_node):
     unknown_identifier = uuid4()
 
     partially_unknown_state_update = WorldStateUpdate(
-        meta_data=world_synchronizer.meta_data,
+        position=StreamPosition(origin=world_synchronizer.origin),
         ids=[known_identifier, unknown_identifier],
         states=[0.0, 9.9],
     )
@@ -1920,7 +1939,7 @@ def test_apply_state_with_unknown_identifier_raises(rclpy_node):
         world_synchronizer._apply_state(partially_unknown_state_update)
 
     all_unknown_state_update = WorldStateUpdate(
-        meta_data=world_synchronizer.meta_data,
+        position=StreamPosition(origin=world_synchronizer.origin),
         ids=[uuid4(), uuid4()],
         states=[1.0, 2.0],
     )
@@ -2081,9 +2100,9 @@ def test_state_publish_does_not_hold_world_lock(rclpy_node):
     ms.close()
 
     assert state_publish_lock_free, "no state update was published"
-    assert all(
-        state_publish_lock_free
-    ), "State update was published while _world_lock was held."
+    assert all(state_publish_lock_free), (
+        "State update was published while _world_lock was held."
+    )
 
 
 def test_state_change_during_a_modification_is_published_after_its_model_change(
@@ -2099,7 +2118,7 @@ def test_state_change_during_a_modification_is_published_after_its_model_change(
         node=rclpy_node, _world=world, topic_name=f"/publication_order_{uuid4().hex}"
     )
 
-    published_updates: List[WorldUpdate] = []
+    published_updates: list[WorldUpdate] = []
     original_publish = synchronizer.publish
 
     def slowly_publishing_model_updates(update: WorldUpdate):
@@ -2134,18 +2153,18 @@ def test_state_change_during_a_modification_is_published_after_its_model_change(
         assert not announcing_thread.is_alive()
 
         model_update_positions = [
-            update.sequence_number
+            update.position.sequence_number
             for update in published_updates
             if update.modification_block is not None
         ]
-        state_update_positions = [
-            update.sequence_number
+        state_only_update_positions = [
+            update.position.sequence_number
             for update in published_updates
-            if update.state_update is not None
+            if update.state_update is not None and update.modification_block is None
         ]
         assert len(model_update_positions) == 1
-        assert state_update_positions
-        assert max(model_update_positions) < min(state_update_positions)
+        assert state_only_update_positions
+        assert max(model_update_positions) < min(state_only_update_positions)
     finally:
         synchronizer.close()
 
@@ -2266,9 +2285,9 @@ def test_apply_missed_messages_is_atomic_against_concurrent_modify(rclpy_node):
         w1.add_body(toctou_body)
         w1.add_connection(FixedConnection(parent=w1.root, child=toctou_body))
 
-    assert wait_for_condition(
-        lambda: len(ms2.missed_messages) >= 1, timeout=3.0
-    ), "paused receiver never buffered the model change"
+    assert wait_for_condition(lambda: len(ms2.missed_messages) >= 1, timeout=3.0), (
+        "paused receiver never buffered the model change"
+    )
     ms2.resume()
 
     lock_held_during_apply = {}
@@ -2323,14 +2342,18 @@ def test_combined_update_model_and_state_applied_atomically(rclpy_node):
     model_block = source_world.get_world_model_manager().model_modification_blocks[-1]
     new_dof_id = connection.dof.id
 
-    source_meta = MetaData(node_name="atomic_src", process_id=0, world_id=uuid4())
+    source_origin = MessageOrigin(
+        sender=Sender(node_name="atomic_src", process_id=0), model_id=uuid4()
+    )
     combined_update = WorldUpdate(
-        meta_data=source_meta,
+        position=StreamPosition(origin=source_origin),
         modification_block=ModificationBlock(
-            meta_data=source_meta, modifications=model_block
+            position=StreamPosition(origin=source_origin), modifications=model_block
         ),
         state_update=WorldStateUpdate(
-            meta_data=source_meta, ids=[new_dof_id], states=[0.73]
+            position=StreamPosition(origin=source_origin),
+            ids=[new_dof_id],
+            states=[0.73],
         ),
     )
 
@@ -2379,7 +2402,7 @@ class WorldUpdateSender:
     The world whose changes are announced.
     """
 
-    meta_data: MetaData = field(init=False)
+    origin: MessageOrigin = field(init=False)
     """
     Identifies the sender, so a receiver does not mistake an update for its own.
     """
@@ -2390,10 +2413,12 @@ class WorldUpdateSender:
     """
 
     def __post_init__(self):
-        self.meta_data = MetaData(
-            node_name="world_update_sender",
-            process_id=os.getpid(),
-            world_id=self.world._id,
+        """
+        Name the sender after the world it announces, in this process.
+        """
+        self.origin = MessageOrigin(
+            sender=Sender(node_name="world_update_sender", process_id=os.getpid()),
+            model_id=self.world._id,
         )
 
     def lose_model_change(self) -> None:
@@ -2415,15 +2440,16 @@ class WorldUpdateSender:
         self._deliver(
             receiver,
             WorldUpdate(
-                meta_data=self.meta_data,
+                position=StreamPosition(origin=self.origin),
                 modification_block=ModificationBlock(
-                    meta_data=self.meta_data, modifications=modifications
+                    position=StreamPosition(origin=self.origin),
+                    modifications=modifications,
                 ),
             ),
         )
 
     def announce_state_change(
-        self, receiver: WorldSynchronizer, positions: Dict[uuid.UUID, float]
+        self, receiver: WorldSynchronizer, positions: dict[uuid.UUID, float]
     ) -> None:
         """
         Hand over the positions of the given degrees of freedom.
@@ -2434,9 +2460,9 @@ class WorldUpdateSender:
         self._deliver(
             receiver,
             WorldUpdate(
-                meta_data=self.meta_data,
+                position=StreamPosition(origin=self.origin),
                 state_update=WorldStateUpdate(
-                    meta_data=self.meta_data,
+                    position=StreamPosition(origin=self.origin),
                     ids=list(positions.keys()),
                     states=list(positions.values()),
                 ),
@@ -2456,7 +2482,9 @@ class WorldUpdateSender:
         Serialize the update and give it to the receiver the way ros would.
         """
         self._sequence_number += 1
-        update.sequence_number = self._sequence_number
+        update.position = StreamPosition(
+            origin=self.origin, sequence_number=self._sequence_number
+        )
         receiver.subscription_callback(
             std_msgs.msg.String(data=json.dumps(to_json(update)))
         )
@@ -2484,7 +2512,7 @@ class DelayedApplyWorldSynchronizer(WorldSynchronizer):
 
 def create_connected_worlds(
     rclpy_node: Node, name: str
-) -> Tuple[World, World, WorldSynchronizer, WorldSynchronizer]:
+) -> tuple[World, World, WorldSynchronizer, WorldSynchronizer]:
     """
     Build a publishing world and a receiving world that share one prismatic connection.
 
@@ -2519,7 +2547,7 @@ def create_connected_worlds(
         )
     assert wait_for_condition(
         lambda: receiver_synchronizer.has_applied(
-            publisher_synchronizer.latest_published_position
+            position=publisher_synchronizer.latest_published_position
         )
     ), "the receiver never caught up with the initial model"
     return (
@@ -2572,8 +2600,10 @@ def test_deferring_incoming_updates_keeps_outgoing_publishing_alive(rclpy_node):
 
         publish_position(world_1, 1.25)
         assert wait_for_condition(
-            lambda: world_2.get_connections_by_type(PrismaticConnection)[0].position
-            == pytest.approx(1.25, abs=1e-9)
+            lambda: (
+                world_2.get_connections_by_type(PrismaticConnection)[0].position
+                == pytest.approx(1.25, abs=1e-9)
+            )
         ), "the state change of the deferring synchronizer was not published"
     finally:
         synchronizer_1.close()
@@ -2654,7 +2684,7 @@ def test_state_updates_are_applied_up_to_the_next_model_modification(rclpy_node)
 def test_a_model_modification_republishes_the_whole_state(rclpy_node):
     """
     A receiver rebuilding itself from a model modification has no snapshot to fill the
-    gaps with, so the state that follows the modification carries every degree of
+    gaps with, so the state that comes with the modification carries every degree of
     freedom rather than only the ones that moved since the last message.
     """
     (
@@ -2668,7 +2698,7 @@ def test_a_model_modification_republishes_the_whole_state(rclpy_node):
     try:
         publish_position(publisher_world, 1.5)
         # A fixed connection carries no degree of freedom, so nothing about the state
-        # changed and only the republish can account for a state message here.
+        # changed and only the republish can account for the state of this message.
         with publisher_world.modify_world():
             late_body = Body(name=PrefixedName("model_change_republish_late_body"))
             publisher_world.add_body(late_body)
@@ -2676,10 +2706,14 @@ def test_a_model_modification_republishes_the_whole_state(rclpy_node):
                 FixedConnection(parent=publisher_world.root, child=late_body)
             )
         assert wait_for_condition(
-            lambda: len(receiver_synchronizer.missed_messages) == 3
-        ), "expected a state, a model and the model's state republish to be buffered"
+            lambda: len(receiver_synchronizer.missed_messages) == 2
+        ), "expected a state and a model with its whole state to be buffered"
 
-        republished_state = receiver_synchronizer.missed_messages[-1].state_update
+        republished_state = (
+            receiver_synchronizer.missed_messages[-1]
+            .to_message(world=receiver_world)
+            .state_update
+        )
 
         assert republished_state is not None
         assert (
@@ -2771,11 +2805,12 @@ def test_message_arriving_during_a_drain_stays_buffered(rclpy_node):
     )
     try:
         empty_state_update = WorldStateUpdate(
-            meta_data=synchronizer.meta_data, ids=[], states=[]
+            position=StreamPosition(origin=synchronizer.origin), ids=[], states=[]
         )
         synchronizer.missed_messages.append(
             WorldUpdate(
-                meta_data=synchronizer.meta_data, state_update=empty_state_update
+                position=StreamPosition(origin=synchronizer.origin),
+                state_update=empty_state_update,
             )
         )
         drain = threading.Thread(
@@ -2784,7 +2819,8 @@ def test_message_arriving_during_a_drain_stays_buffered(rclpy_node):
         drain.start()
         time.sleep(0.1)
         late_message = WorldUpdate(
-            meta_data=synchronizer.meta_data, state_update=empty_state_update
+            position=StreamPosition(origin=synchronizer.origin),
+            state_update=empty_state_update,
         )
         synchronizer._subscription_callback(late_message)
         drain.join(timeout=5.0)
@@ -2796,18 +2832,6 @@ def test_message_arriving_during_a_drain_stays_buffered(rclpy_node):
 
 
 # %% positions in the stream of a publisher
-
-
-def test_a_message_reports_where_it_sits_in_the_stream_of_its_publisher():
-    """
-    A message carries everything a reader needs to tell how far it caught up with the
-    publisher that sent it.
-    """
-    meta_data = MetaData(node_name="publisher", process_id=1)
-
-    message = WorldUpdate(meta_data=meta_data, sequence_number=3)
-
-    assert message.position == StreamPosition(origin=meta_data, sequence_number=3)
 
 
 def test_every_publication_advances_the_stream_position(rclpy_node):
@@ -2825,9 +2849,11 @@ def test_every_publication_advances_the_stream_position(rclpy_node):
         for expected_position in (1, 2, 3):
             synchronizer.publish(
                 WorldUpdate(
-                    meta_data=synchronizer.meta_data,
+                    position=StreamPosition(origin=synchronizer.origin),
                     state_update=WorldStateUpdate(
-                        meta_data=synchronizer.meta_data, ids=[], states=[]
+                        position=StreamPosition(origin=synchronizer.origin),
+                        ids=[],
+                        states=[],
                     ),
                 )
             )
@@ -2837,7 +2863,7 @@ def test_every_publication_advances_the_stream_position(rclpy_node):
                 == expected_position
             )
             assert synchronizer.latest_published_position.origin == (
-                synchronizer.meta_data
+                synchronizer.origin
             )
     finally:
         synchronizer.close()
@@ -2859,15 +2885,15 @@ def test_applying_an_update_records_the_position_of_its_publisher(rclpy_node):
         position = publisher_synchronizer.latest_published_position
 
         assert wait_for_condition(
-            lambda: receiver_synchronizer.has_applied(position)
+            lambda: receiver_synchronizer.has_applied(position=position)
         ), "the receiver never caught up with the published position"
         assert receiver_synchronizer.has_applied(
-            StreamPosition(
+            position=StreamPosition(
                 origin=position.origin, sequence_number=position.sequence_number - 1
             )
         )
         assert not receiver_synchronizer.has_applied(
-            StreamPosition(
+            position=StreamPosition(
                 origin=position.origin, sequence_number=position.sequence_number + 1
             )
         )
@@ -2886,13 +2912,13 @@ def test_a_publisher_that_was_never_heard_from_is_at_the_start_of_its_stream(
     synchronizer = WorldSynchronizer(
         node=rclpy_node, _world=world, topic_name=f"/unknown_publisher_{uuid4().hex}"
     )
-    stranger = MetaData(node_name="stranger", process_id=1)
+    stranger = MessageOrigin(sender=Sender(node_name="stranger", process_id=1))
     try:
         assert synchronizer.has_applied(
-            StreamPosition(origin=stranger, sequence_number=0)
+            position=StreamPosition(origin=stranger, sequence_number=0)
         )
         assert not synchronizer.has_applied(
-            StreamPosition(origin=stranger, sequence_number=1)
+            position=StreamPosition(origin=stranger, sequence_number=1)
         )
     finally:
         synchronizer.close()
@@ -2917,11 +2943,11 @@ def test_a_buffered_update_does_not_count_as_caught_up_with(rclpy_node):
             lambda: len(receiver_synchronizer.missed_messages) == 1
         ), "the update was never received"
 
-        assert not receiver_synchronizer.has_applied(position)
+        assert not receiver_synchronizer.has_applied(position=position)
 
         receiver_synchronizer.apply_missed_messages()
 
-        assert receiver_synchronizer.has_applied(position)
+        assert receiver_synchronizer.has_applied(position=position)
     finally:
         publisher_synchronizer.close()
         receiver_synchronizer.close()
@@ -3034,12 +3060,15 @@ def test_an_update_referencing_an_entity_this_world_never_received_says_so(rclpy
             sender_world, _make_simple_world_with_root("hanger"), post_root
         )
 
-        with pytest.raises(WorldUpdateReferencesUnknownEntityError) as raised:
-            sender.announce_model_change(receiver_synchronizer)
+        sender.announce_model_change(receiver_synchronizer)
 
-        assert raised.value.publisher == sender.meta_data
-        assert raised.value.entity_id == post_root.id
-        assert raised.value.entity_name == post_root.name
+        unknown_entity = receiver_synchronizer.divergence_from(
+            publisher=sender.origin
+        ).raised_from
+        assert isinstance(unknown_entity, WorldUpdateReferencesUnknownEntityError)
+        assert unknown_entity.sender == sender.origin.sender
+        assert unknown_entity.entity_id == post_root.id
+        assert unknown_entity.entity_name == post_root.name
         assert receiver_world.kinematic_structure_entities == [sender_root]
     finally:
         receiver_synchronizer.close()
@@ -3128,13 +3157,390 @@ def test_a_split_part_and_its_rollback_reach_a_synchronized_world(rclpy_node):
         sender.rollback_modification_blocks()
 
         assert wait_for_condition(lambda: len(receiver.bodies) == 1)
-        assert wait_for_condition(
-            lambda: received_faces("collision") == whole_faces
-        ), "the receiver kept the cut shape after the rollback"
+        assert wait_for_condition(lambda: received_faces("collision") == whole_faces), (
+            "the receiver kept the cut shape after the rollback"
+        )
         assert received_faces("visual") == whole_faces
     finally:
         sender_synchronizer.close()
         receiver_synchronizer.close()
+
+
+# %% updates a receiver could not keep up with
+
+
+def add_prismatic_connection(world: World, name: str) -> PrismaticConnection:
+    """
+    :param world: The world the connection is added to.
+    :param name: Names the body the connection moves.
+    :return: A new prismatic connection moving a new body of `world` along its root.
+    """
+    with world.modify_world():
+        child_body = Body(name=PrefixedName(name))
+        world.add_body(child_body)
+        connection = PrismaticConnection.create_with_dofs(
+            world=world, parent=world.root, child=child_body, axis=Vector3.X()
+        )
+        world.add_connection(connection)
+    return connection
+
+
+def move_connection(
+    world: World, connection: PrismaticConnection, position: float
+) -> None:
+    """
+    Move `connection` of `world` and announce the change.
+    """
+    world.state[connection.dof.id].position = position
+    world.notify_state_change()
+
+
+def test_updates_published_while_a_receiver_is_busy_are_not_lost(rclpy_node) -> None:
+    """
+    Only what changed is published, so an update that is lost while the receiver is busy
+    applying another one leaves a degree of freedom that does not move again stale for
+    good.
+    """
+    (
+        publisher_world,
+        receiver_world,
+        publisher_synchronizer,
+        receiver_synchronizer,
+    ) = create_connected_worlds(rclpy_node, "busy_receiver")
+    try:
+        moving = publisher_world.get_connections_by_type(PrismaticConnection)[0]
+        moved_once = add_prismatic_connection(publisher_world, "busy_receiver_once")
+        assert wait_for_condition(
+            lambda: receiver_synchronizer.has_applied(
+                position=publisher_synchronizer.latest_published_position
+            )
+        ), "the receiver never caught up with the second connection"
+
+        with receiver_world._world_lock:
+            move_connection(publisher_world, moving, 0.1)
+            move_connection(publisher_world, moved_once, 0.5)
+            for step in range(100):
+                move_connection(publisher_world, moving, 0.2 + 0.001 * step)
+
+        assert wait_for_condition(
+            lambda: receiver_synchronizer.has_applied(
+                position=publisher_synchronizer.latest_published_position
+            )
+        ), "the receiver never caught up with the burst"
+        assert receiver_world.state[moved_once.dof.id].position == pytest.approx(
+            publisher_world.state[moved_once.dof.id].position
+        )
+    finally:
+        publisher_synchronizer.close()
+        receiver_synchronizer.close()
+
+
+@dataclass
+class LoggerRecordingWarnings:
+    """
+    Stands in for the logger of a ros node, recording every warning it is given.
+    """
+
+    warnings: list[str] = field(default_factory=list)
+    """
+    Every warning given, in order.
+    """
+
+    def warning(self, message: str, **kwargs) -> None:
+        self.warnings.append(message)
+
+
+@dataclass
+class ReceivingSynchronizer:
+    """
+    A synchronizer of an empty world, on a topic nobody else publishes on, and the
+    warnings its node gives.
+    """
+
+    synchronizer: WorldSynchronizer
+    """
+    Receives the updates.
+    """
+
+    logger: LoggerRecordingWarnings
+    """
+    Records the warnings of the node of :attr:`synchronizer`.
+    """
+
+    def receive(self, *, publisher: MessageOrigin, sequence_number: int) -> None:
+        """
+        Hand the synchronizer an update of `publisher` at `sequence_number` in its
+        stream that changes nothing.
+        """
+        update = WorldUpdate(
+            position=StreamPosition(origin=publisher, sequence_number=sequence_number),
+            state_update=WorldStateUpdate(
+                position=StreamPosition(origin=publisher), ids=[], states=[]
+            ),
+        )
+        self.synchronizer.subscription_callback(
+            std_msgs.msg.String(data=json.dumps(to_json(update)))
+        )
+
+
+@pytest.fixture()
+def receiving(rclpy_node, monkeypatch) -> ReceivingSynchronizer:
+    synchronizer = WorldSynchronizer(
+        node=rclpy_node,
+        _world=World(name="receiving"),
+        topic_name=unique_topic("receiving"),
+    )
+    logger = LoggerRecordingWarnings()
+    monkeypatch.setattr(rclpy_node, "get_logger", lambda: logger)
+    yield ReceivingSynchronizer(synchronizer=synchronizer, logger=logger)
+    synchronizer.close()
+
+
+def test_a_receiver_that_lost_updates_warns_about_it(
+    receiving: ReceivingSynchronizer,
+) -> None:
+    """
+    Its world may differ from the publisher's in what the lost updates carried.
+    """
+    publisher = MessageOrigin(sender=Sender(node_name="publisher", process_id=1))
+    receiving.receive(publisher=publisher, sequence_number=1)
+    receiving.receive(publisher=publisher, sequence_number=4)
+
+    assert len(receiving.logger.warnings) == 1
+
+
+def test_updates_received_in_sequence_are_not_lost(
+    receiving: ReceivingSynchronizer,
+) -> None:
+    """
+    Updates of a publisher that follow each other give no warning about lost updates.
+    """
+    publisher = MessageOrigin(sender=Sender(node_name="publisher", process_id=1))
+    receiving.receive(publisher=publisher, sequence_number=1)
+    receiving.receive(publisher=publisher, sequence_number=2)
+
+    assert receiving.logger.warnings == []
+
+
+def test_a_publisher_heard_from_for_the_first_time_has_lost_nothing(
+    receiving: ReceivingSynchronizer,
+) -> None:
+    """
+    A receiver that joins late starts somewhere in the middle of the stream, having
+    fetched what was published before.
+    """
+    receiving.receive(
+        publisher=MessageOrigin(sender=Sender(node_name="publisher", process_id=1)),
+        sequence_number=7,
+    )
+
+    assert receiving.logger.warnings == []
+
+
+# %% state written inside a modification
+
+
+def add_placed_body(world: World, body: Body) -> None:
+    """
+    Attach ``body`` to the root of ``world`` by a 6-DoF connection and move it away from
+    the root's origin, both within one modification.
+    """
+    root = world.root
+    with world.modify_world():
+        world.add_connection(
+            Connection6DoF.create_with_dofs(world=world, parent=root, child=body)
+        )
+        body.parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
+            x=0.95, z=1.04, reference_frame=root
+        )
+
+
+@dataclass(eq=False, kw_only=True)
+class BodyTransformRecorder(StateChangeCallback):
+    """
+    Records where a body is each time its world announces a state change, as any
+    observer of that world would see it.
+    """
+
+    body_id: uuid.UUID
+    """
+    The body whose global transform is recorded once it is part of the world.
+    """
+
+    recorded_transforms: list[np.ndarray] = field(default_factory=list, init=False)
+    """
+    The global transform of the body at every announced state change it was part of.
+    """
+
+    def on_state_change(self, **kwargs) -> None:
+        bodies = [body for body in self._world.bodies if body.id == self.body_id]
+        if not bodies:
+            return
+        self.recorded_transforms.append(bodies[0].global_transform.to_np())
+
+
+def test_a_body_placed_inside_its_modification_reaches_another_world_at_that_place(
+    rclpy_node,
+):
+    """
+    A movable body added and placed within one modification reaches a synchronized world
+    at that place, with no position arriving before the degrees of freedom it sets.
+    """
+    (
+        publisher_world,
+        receiver_world,
+        publisher_synchronizer,
+        receiver_synchronizer,
+    ) = create_connected_worlds(rclpy_node, "placed_inside_modification")
+    try:
+        placed_body = Body(name=PrefixedName("placed_inside_modification_body"))
+        add_placed_body(publisher_world, placed_body)
+
+        assert wait_for_condition(
+            lambda: receiver_synchronizer.has_applied(
+                position=publisher_synchronizer.latest_published_position
+            )
+        ), "the receiver never applied the modification"
+        received_body = receiver_world.get_kinematic_structure_entity_by_id(
+            placed_body.id
+        )
+        np.testing.assert_array_almost_equal(
+            received_body.global_transform.to_np(),
+            placed_body.global_transform.to_np(),
+        )
+    finally:
+        publisher_synchronizer.close()
+        receiver_synchronizer.close()
+
+
+def test_a_modification_leaves_as_one_update_with_the_state_written_in_it(rclpy_node):
+    """
+    A modification is published as a single update carrying its model change together
+    with the whole state, including the positions written inside the modification.
+    """
+    (
+        publisher_world,
+        receiver_world,
+        publisher_synchronizer,
+        receiver_synchronizer,
+    ) = create_connected_worlds(rclpy_node, "one_update_per_modification")
+    receiver_synchronizer.defer_incoming_updates = True
+    try:
+        sequence_number_before = publisher_synchronizer.published_sequence_number
+        add_placed_body(
+            publisher_world, Body(name=PrefixedName("one_update_per_modification_body"))
+        )
+
+        assert (
+            publisher_synchronizer.published_sequence_number
+            == sequence_number_before + 1
+        )
+        assert wait_for_condition(
+            lambda: len(receiver_synchronizer.missed_messages) == 1
+        ), "the update of the modification never arrived"
+        update = receiver_synchronizer.missed_messages[0].to_message(
+            world=receiver_world
+        )
+        assert update.modification_block is not None
+        assert (
+            dict(zip(update.state_update.ids, update.state_update.states))
+            == publisher_world.state.to_uuid_position_dict()
+        )
+    finally:
+        publisher_synchronizer.close()
+        receiver_synchronizer.close()
+
+
+def test_a_receiving_world_never_shows_a_new_body_away_from_its_place(rclpy_node):
+    """
+    Every state change a receiving world announces while taking in a body that was added
+    and placed in one modification already shows the body at its place.
+    """
+    (
+        publisher_world,
+        receiver_world,
+        publisher_synchronizer,
+        receiver_synchronizer,
+    ) = create_connected_worlds(rclpy_node, "never_away_from_its_place")
+    placed_body = Body(name=PrefixedName("never_away_from_its_place_body"))
+    recorder = BodyTransformRecorder(_world=receiver_world, body_id=placed_body.id)
+    try:
+        add_placed_body(publisher_world, placed_body)
+
+        assert wait_for_condition(
+            lambda: receiver_synchronizer.has_applied(
+                position=publisher_synchronizer.latest_published_position
+            )
+        ), "the receiver never applied the modification"
+        assert recorder.recorded_transforms, "the receiver never announced the body"
+        for recorded_transform in recorder.recorded_transforms:
+            np.testing.assert_array_almost_equal(
+                recorded_transform, placed_body.global_transform.to_np()
+            )
+    finally:
+        recorder.stop()
+        publisher_synchronizer.close()
+        receiver_synchronizer.close()
+
+
+# %% writing received positions
+
+
+def test_received_positions_land_on_the_degrees_of_freedom_they_name(rclpy_node):
+    """
+    Positions received while another thread rearranges the state of the world are
+    written to the degrees of freedom they name, wherever those sit once it is done.
+    """
+    world = World(name="rearranged_state")
+    with world.modify_world():
+        world.add_body(Body(name=PrefixedName("rearranged_state_root")))
+    removed_connection = add_prismatic_connection(world, "rearranged_state_removed")
+    kept_connection = add_prismatic_connection(world, "rearranged_state_kept")
+    synchronizer = WorldSynchronizer(
+        node=rclpy_node, _world=world, topic_name=unique_topic("rearranged_state")
+    )
+    received_positions = WorldStateUpdate(
+        position=StreamPosition(origin=synchronizer.origin),
+        ids=[kept_connection.dof.id],
+        states=[0.7],
+    )
+    checked = threading.Event()
+    original_check = synchronizer._check_state_update
+
+    def check_and_wait_for_the_rearranging_thread(**kwargs) -> None:
+        """
+        Check the received positions, then hold still long enough for the state to be
+        rearranged before they are written.
+        """
+        original_check(**kwargs)
+        checked.set()
+        # give the rearranging thread the time to take the world lock
+        time.sleep(0.3)
+
+    synchronizer._check_state_update = check_and_wait_for_the_rearranging_thread
+
+    def rearrange_the_state() -> None:
+        """
+        Remove the degree of freedom in front of the received one once the positions
+        were checked, which moves the received one to another column.
+        """
+        checked.wait(timeout=5.0)
+        with world._world_lock:
+            # give the writing thread the time to reach the world lock
+            time.sleep(0.3)
+            with world.modify_world():
+                world.remove_kinematic_structure_entity(removed_connection.child)
+
+    rearranging_thread = threading.Thread(target=rearrange_the_state)
+    try:
+        rearranging_thread.start()
+        synchronizer._apply_state(received_positions)
+        rearranging_thread.join(timeout=5.0)
+
+        assert not rearranging_thread.is_alive()
+        assert world.state[kept_connection.dof.id].position == pytest.approx(0.7)
+    finally:
+        synchronizer.close()
 
 
 if __name__ == "__main__":

@@ -1,3 +1,8 @@
+"""
+Where the robot can stand to reach or to see a target, sampled from costmaps of the
+world as it is when they are sampled.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
@@ -6,7 +11,6 @@ from dataclasses import dataclass, field
 import numpy as np
 from typing_extensions import Iterator
 
-from coraplex.datastructures.dataclasses import Context
 from coraplex.datastructures.enums import ReachFraction
 from coraplex.locations.base import Location
 from coraplex.locations.costmaps import (
@@ -15,8 +19,10 @@ from coraplex.locations.costmaps import (
     RingCostmap,
     VisibilityCostmap,
 )
-from semantic_digital_twin.robots.robot_parts import Arm
-from semantic_digital_twin.spatial_types.spatial_types import Pose
+from coraplex.plans.context_extensions import RobotAccess, StatementGrounding
+from cramph.context import StatechartContext
+from semantic_digital_twin.robots.robot_parts import AbstractRobot, Arm
+from krrood_spatial_math.spatial_types import Pose, Pose2D
 
 
 @dataclass
@@ -26,9 +32,10 @@ class CostmapLocation(Location, ABC):
     they are sampled.
     """
 
-    context: Context = field(kw_only=True)
+    context: StatechartContext = field(kw_only=True)
     """
-    The context holding the robot and the world the costmap is built from.
+    The context of the plan the location is sampled for, whose robot is the one to stand
+    and whose world the costmap is built from.
     """
 
     map_resolution: float = field(default=0.02, kw_only=True)
@@ -41,13 +48,22 @@ class CostmapLocation(Location, ABC):
     Number of cells along each side of that costmap.
     """
 
-    def __post_init__(self) -> None:
+    @property
+    def robot(self) -> AbstractRobot:
         """
-        Take the plan's sampling seed unless this location has its own.
+        :return: The robot to stand.
         """
-        if self.seed is not None:
-            return
-        self.seed = self.context.sampling_seed
+        return self.context.require_extension(extension_type=RobotAccess).robot
+
+    @property
+    def sampling_seed(self) -> int | None:
+        """
+        :return: The seed of the plan the location is sampled for, so a run can be
+            repeated; ``None`` samples afresh each time.
+        """
+        return self.context.require_extension(
+            extension_type=StatementGrounding
+        ).sampling_seed
 
     @abstractmethod
     def costmap(self) -> Costmap:
@@ -56,8 +72,10 @@ class CostmapLocation(Location, ABC):
             is now.
         """
 
-    def candidates(self) -> Iterator[Pose]:
-        return self.costmap().sample(self.number_of_samples, self.seed)
+    def candidates(self) -> Iterator[Pose2D]:
+        return self.costmap().sample(
+            number_of_samples=self.number_of_samples, seed=self.sampling_seed
+        )
 
     def _in_world(self, pose: Pose) -> Pose:
         """
@@ -65,7 +83,8 @@ class CostmapLocation(Location, ABC):
         :return: Where `pose` is in the world frame now, so a pose given relative to a
             body follows that body.
         """
-        return self.context.world.transform(pose, self.context.world.root)
+        world = self.context.world
+        return world.transform(pose, world.root)
 
 
 @dataclass
@@ -103,13 +122,12 @@ class ReachabilityLocation(CostmapLocation):
         """
         target_pose = self._in_world(self.target_pose)
         occupancy = OccupancyCostmap.default_map(
-            context=self.context,
+            robot=self.robot,
             target=target_pose,
             resolution=self.map_resolution,
             cells=self.map_cells,
         )
         ring = RingCostmap.from_arm_reach_distance(
-            context=self.context,
             arm=self.arm,
             origin=target_pose,
             reach_fraction=self.reach_fraction,
@@ -119,7 +137,7 @@ class ReachabilityLocation(CostmapLocation):
         )
         return occupancy & ring
 
-    def candidates(self) -> Iterator[Pose]:
+    def candidates(self) -> Iterator[Pose2D]:
         """
         :return: The poses sampled from the costmap, in the order they were sampled,
             leaving out those farther from the target along the floor than the arm is
@@ -152,9 +170,9 @@ class VisibilityLocation(CostmapLocation):
             view.
         """
         target_pose = self._in_world(self.target_pose)
-        camera = self.context.robot.get_default_camera()
+        camera = self.robot.get_default_camera()
         occupancy = OccupancyCostmap.default_map(
-            context=self.context,
+            robot=self.robot,
             target=target_pose,
             resolution=self.map_resolution,
             cells=self.map_cells,

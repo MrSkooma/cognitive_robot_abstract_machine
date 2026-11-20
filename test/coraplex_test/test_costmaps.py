@@ -1,7 +1,13 @@
+"""
+Tests of the costmaps that rate the places around a target, and of how poses are sampled
+from them.
+"""
+
+from __future__ import annotations
+
 from copy import deepcopy
 import operator
 from itertools import islice
-from typing_extensions import Optional
 
 import numpy as np
 from numpy.typing import NDArray
@@ -14,30 +20,32 @@ from coraplex.locations.costmaps import (
     RingCostmap,
 )
 from krrood.entity_query_language.exceptions import NonPositiveLimitValue
-from semantic_digital_twin.spatial_types import (
+from krrood_spatial_math.spatial_types import (
     HomogeneousTransformationMatrix,
     Point3,
     RotationMatrix,
     Vector3,
+    Pose,
+    Pose2D,
 )
-from semantic_digital_twin.spatial_types.spatial_types import Pose
+from ..sampling import SAMPLING_SEED
 
 # ---- Occupancy locations tests ----
 
 
 def test_attachment_exclusion(pr2_apartment_context, rclpy_node):
 
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
 
     robot_view.root.parent_connection.origin = (
         HomogeneousTransformationMatrix.from_xyz_rpy(
             -1.5, 1, 0, reference_frame=world.root
         )
     )
-    world.get_body_by_name("milk.stl").parent_connection.origin = (
-        HomogeneousTransformationMatrix.from_xyz_rpy(
-            -1.8, 1, 1, reference_frame=world.root
-        )
+    world.get_body_by_name(
+        "milk.stl"
+    ).parent_connection.origin = HomogeneousTransformationMatrix.from_xyz_rpy(
+        -1.8, 1, 1, reference_frame=world.root
     )
 
     test_world = deepcopy(world)
@@ -61,7 +69,7 @@ def test_attachment_exclusion(pr2_apartment_context, rclpy_node):
 
 
 def test_merge_costmap(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     o = OccupancyCostmap(
         distance_to_obstacle=0.2,
         height=200,
@@ -95,7 +103,7 @@ def test_merge_costmap(pr2_apartment_context):
 def test_a_merged_map_samples_on_the_terms_of_the_map_it_was_merged_into(
     pr2_apartment_context, merge
 ):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     origin = Pose.from_xyz_quaternion(0, 0, 0, 0, 0, 0, 1, world.root)
     first = GaussianCostmap(
         resolution=0.02,
@@ -125,7 +133,7 @@ def test_a_merged_map_samples_on_the_terms_of_the_map_it_was_merged_into(
 
 
 def test_occupancy_robot_exclusion(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     robot_view.root.parent_connection.origin = (
         HomogeneousTransformationMatrix.from_xyz_rpy(10, 10)
     )
@@ -146,7 +154,7 @@ def test_occupancy_leaves_the_floor_free(pr2_apartment_context):
     The ground the robot drives on is not an obstacle: over a patch of open floor every
     cell stays free, and only what stands on the floor occupies anything.
     """
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
 
     occupancy_map = OccupancyCostmap(
         resolution=0.02,
@@ -163,7 +171,7 @@ def test_occupancy_leaves_the_floor_free(pr2_apartment_context):
 
 def test_gaussian_costmap(pr2_apartment_context):
 
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     gaussian_map = GaussianCostmap(
         resolution=0.02,
         origin=Pose.from_xyz_quaternion(3.1, 2.2, 0, 0, 0, 1, 0, world.root),
@@ -189,7 +197,7 @@ def test_a_reachability_map_rates_only_the_side_the_robot_can_reach_from(
     Merged with an occupancy map, the reachability map barely rates the far side of what
     the target rests against, and few candidates come from there.
     """
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     occupancy_map = OccupancyCostmap(
         resolution=0.02,
         height=400,
@@ -211,7 +219,11 @@ def test_a_reachability_map_rates_only_the_side_the_robot_can_reach_from(
     reach_map = occupancy_map + gaussian_map
 
     assert np.sum(reach_map.map[:200, :]) < 5
-    poses = list(reach_map.sample(reach_map.number_of_samples, context.sampling_seed))
+    poses = list(
+        reach_map.sample(
+            number_of_samples=reach_map.number_of_samples, seed=SAMPLING_SEED
+        )
+    )
     from_the_far_side = sum(1 for pose in poses if pose.position.x < 3.0)
     assert from_the_far_side < STRAY_CANDIDATE_SHARE * len(poses)
 
@@ -220,7 +232,7 @@ def test_a_reachability_map_rates_only_the_side_the_robot_can_reach_from(
 
 
 def test_position_generation(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[90:110, 90:110] = 1
     gaussian_map = GaussianCostmap(
@@ -240,7 +252,7 @@ def test_position_generation(pr2_apartment_context):
 
 
 def test_segment_map(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[90:110, 90:110] = 1
     np_map[20:40, 20:40] = 1
@@ -264,7 +276,7 @@ def test_segment_map(pr2_apartment_context):
 
 
 def test_sample_x_axis(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[:, 99:101] = 1
 
@@ -285,7 +297,7 @@ def test_sample_x_axis(pr2_apartment_context):
 
 
 def test_sample_x_axis_offset(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[120:140, 90:110] = 1
 
@@ -307,7 +319,7 @@ def test_sample_x_axis_offset(pr2_apartment_context):
 
 
 def test_sample_x_axis_offset_non_id(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[120:140, 90:110] = 1
 
@@ -329,7 +341,7 @@ def test_sample_x_axis_offset_non_id(pr2_apartment_context):
 
 
 def test_sample_to_pose_gau(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[120:140, 90:110] = 1
     gaussian_map = GaussianCostmap(
@@ -362,7 +374,7 @@ def test_sample_to_pose_gau(pr2_apartment_context):
 
 
 def test_sample_y_axis(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[99:101, :] = 1
     gaussian_map = GaussianCostmap(
@@ -381,7 +393,7 @@ def test_sample_y_axis(pr2_apartment_context):
 
 
 def test_sample_rotated(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[120:121, 99:101] = 1
     gaussian_map = GaussianCostmap(
@@ -408,7 +420,11 @@ def test_sample_rotated(pr2_apartment_context):
 
 
 def test_sample_to_pose(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    """
+    The candidate of a Gaussian map whose only rated cell is set by hand is a planar
+    pose at that cell.
+    """
+    world, robot_view, extensions = pr2_apartment_context
 
     np_map = np.zeros((200, 200))
     np_map[130, 160] = 1
@@ -426,11 +442,11 @@ def test_sample_to_pose(pr2_apartment_context):
 
     assert pose.position.x == 1.6
     assert pose.position.y == 2.2
-    assert pose.position.z == 0
+    assert isinstance(pose, Pose2D)
 
 
 def test_sample_highest_first(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[40, 40] = 1
     np_map[80, 80] = 2
@@ -454,7 +470,7 @@ def test_sample_highest_first(pr2_apartment_context):
 
 
 def test_segment_highest_first(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     np_map[40:45, 40:45] = 1
     np_map[80:85, 80:85] = 3
@@ -477,7 +493,7 @@ def test_segment_highest_first(pr2_apartment_context):
 
 
 def test_segment_empty_map(pr2_apartment_context):
-    world, robot_view, context = pr2_apartment_context
+    world, robot_view, extensions = pr2_apartment_context
     np_map = np.zeros((200, 200))
     gaussian_map = GaussianCostmap(
         resolution=0.02,
@@ -525,17 +541,17 @@ def _sparsely_rated_map(world) -> RingCostmap:
 
 
 def _stand_off_distances(
-    costmap: Costmap, seed: Optional[int], count: int
+    costmap: Costmap, seed: int | None, count: int
 ) -> NDArray[np.float64]:
     """
     :return: How far the first ``count`` candidates stand from the map's origin.
     """
-    origin = costmap.origin.position.to_np()[:3]
+    origin = costmap.origin.position.to_np()[:2]
     return np.array(
         [
-            float(np.linalg.norm(pose.position.to_np()[:3] - origin))
+            float(np.linalg.norm(pose.position.to_np()[:2] - origin))
             for pose in islice(
-                costmap.sample(costmap.number_of_samples, seed),
+                costmap.sample(number_of_samples=costmap.number_of_samples, seed=seed),
                 count,
             )
         ]
@@ -612,8 +628,8 @@ def test_how_many_candidates_to_sample_is_the_callers_to_say(pr2_apartment_conte
     world, _, _ = pr2_apartment_context
     ring = _ring_map(world)
 
-    few = list(ring.sample(12, None))
-    many = list(ring.sample(300, None))
+    few = list(ring.sample(number_of_samples=12, seed=None))
+    many = list(ring.sample(number_of_samples=300, seed=None))
 
     assert len(few) == 12
     assert len(many) == 300
@@ -629,7 +645,7 @@ def test_a_sampled_candidate_faces_the_maps_origin(pr2_apartment_context):
 
     sampled = list(
         islice(
-            ring.sample(10, None),
+            ring.sample(number_of_samples=10, seed=None),
             5,
         )
     )
@@ -637,7 +653,7 @@ def test_a_sampled_candidate_faces_the_maps_origin(pr2_apartment_context):
     assert len(sampled) == 5
     for candidate in sampled:
         facing = RotationMatrix.from_quaternion(candidate.quaternion) @ Vector3.X()
-        to_origin = ring.origin.position - candidate.position
+        to_origin = ring.origin.position - candidate.pose.position
         assert float(facing.angle_between(to_origin)) == pytest.approx(0, abs=1e-6)
 
 
@@ -695,7 +711,7 @@ def test_a_sparsely_rated_map_is_sampled_from_within_its_rated_entries(
     world, _, _ = pr2_apartment_context
     costmap = _sparsely_rated_map(world)
 
-    poses = list(costmap.sample(costmap.number_of_samples, 0))
+    poses = list(costmap.sample(number_of_samples=costmap.number_of_samples, seed=0))
 
     assert len(poses) == int(np.count_nonzero(costmap.map))
 
@@ -713,7 +729,7 @@ def test_a_budget_smaller_than_the_segment_count_still_offers_candidates(
     costmap = _sparsely_rated_map(world)
     asked_for = len(costmap.segment_map()) - 1
 
-    poses = list(costmap.sample(asked_for, None))
+    poses = list(costmap.sample(number_of_samples=asked_for, seed=None))
 
     assert len(poses) == asked_for
 
@@ -730,7 +746,7 @@ def test_a_segment_is_sampled_from_as_much_as_it_is_rated(pr2_apartment_context)
     costmap.map[120:140, 120:140] = 0.25
     budget = 100
 
-    poses = list(costmap.sample(budget, 0))
+    poses = list(costmap.sample(number_of_samples=budget, seed=0))
 
     preferred_share = costmap.map[20:40, 20:40].sum() / costmap.map.sum()
     sampled_from_preferred = sum(
@@ -765,7 +781,7 @@ def test_a_map_offers_no_more_candidates_than_it_holds(pr2_apartment_context):
     costmap = _ring_map(world)
     costmap.map = np.ones((3, 3))
 
-    poses = list(costmap.sample(100 * costmap.map.size, None))
+    poses = list(costmap.sample(number_of_samples=100 * costmap.map.size, seed=None))
 
     assert len(poses) == costmap.map.size
 
@@ -779,7 +795,9 @@ def test_a_map_that_rates_nothing_offers_nothing(pr2_apartment_context):
     costmap = _ring_map(world)
     costmap.map = np.zeros((200, 200))
 
-    assert list(costmap.sample(costmap.number_of_samples, 0)) == []
+    assert (
+        list(costmap.sample(number_of_samples=costmap.number_of_samples, seed=0)) == []
+    )
 
 
 @pytest.mark.parametrize("asked_for", [0, -1, -5])
@@ -795,4 +813,4 @@ def test_a_map_asked_for_no_candidates_says_so(pr2_apartment_context, asked_for)
     costmap = _ring_map(world)
 
     with pytest.raises(NonPositiveLimitValue):
-        costmap.sample(asked_for, None)
+        costmap.sample(number_of_samples=asked_for, seed=None)

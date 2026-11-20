@@ -1,3 +1,9 @@
+"""
+Fixtures shared by the krrood tests, and the generation of their ORM interface.
+"""
+
+from __future__ import annotations
+
 import logging
 import os
 import tempfile
@@ -30,8 +36,13 @@ from .dataset import (
     example_classes,
     semantic_world_like_classes,
     alternative_mappings_construction_order,
+    annotated_fields,
+    chained_exceptions,
+    dataclass_field_descriptors,
     clashing_field_names,
     classes_with_generic,
+    identity_hashed_values_created_on_access,
+    interface_typed_fields,
     single_value_classes,
 )
 from .dataset.example_classes import (
@@ -70,10 +81,6 @@ def generate_sqlalchemy_interface():
 
     # collect all classes that need persistence
     all_classes = {c.clazz for c in symbol_graph._class_diagram.wrapped_classes}
-    all_classes |= {
-        alternative_mapping.original_class()
-        for alternative_mapping in recursive_subclasses(AlternativeMapping)
-    }
     all_classes |= set(classes_of_module(krrood.symbol_graph.symbol_graph))
     all_classes |= set(classes_of_module(example_classes))
     all_classes |= set(classes_of_module(semantic_world_like_classes))
@@ -84,9 +91,14 @@ def generate_sqlalchemy_interface():
     all_classes |= set(classes_of_module(classes_for_testing_role_recursion_error))
     all_classes |= set(classes_of_module(roles_over_a_value_stored_as_json))
     all_classes |= set(classes_of_module(alternative_mappings_construction_order))
+    all_classes |= set(classes_of_module(annotated_fields))
+    all_classes |= set(classes_of_module(chained_exceptions))
+    all_classes |= set(classes_of_module(dataclass_field_descriptors))
     all_classes |= set(classes_of_module(clashing_field_names))
     all_classes |= set(classes_of_module(classes_with_generic))
     all_classes |= set(classes_of_module(single_value_classes))
+    all_classes |= set(classes_of_module(identity_hashed_values_created_on_access))
+    all_classes |= set(classes_of_module(interface_typed_fields))
     all_classes |= {Symbol, Role}
 
     # remove classes that don't need persistence
@@ -101,18 +113,24 @@ def generate_sqlalchemy_interface():
         if is_dataclass(c) and not issubclass(c, AlternativeMapping)
     }
 
+    # a mapped class need not be a dataclass, such as an interface its mappings share
+    all_classes |= {
+        alternative_mapping.original_class()
+        for alternative_mapping in recursive_subclasses(AlternativeMapping)
+    }
+
     all_classes |= {FunctionType}
     logging.basicConfig(level=logging.DEBUG)
     logging.getLogger("krrood").setLevel(logging.DEBUG)
 
     class_diagram = ClassDiagram(
-        list(sorted(all_classes, key=lambda c: c.__name__, reverse=True))
+        classes=list(sorted(all_classes, key=lambda c: c.__name__, reverse=True))
     )
 
     instance = ORMatic(
         class_dependency_graph=class_diagram,
         interface_information=OrmaticInterfaceInformation(
-            type_mappings=TypeDict({KRROODPhysicalObject: ConceptType}),
+            type_mappings=TypeDict(_dict={KRROODPhysicalObject: ConceptType}),
             alternative_mappings=recursive_subclasses(AlternativeMapping),
         ),
     )
@@ -132,7 +150,7 @@ def generate_sqlalchemy_interface():
     with tempfile.NamedTemporaryFile(
         "w", dir=directory, prefix="ormatic_interface.", suffix=".py.tmp", delete=False
     ) as temporary_file:
-        instance.to_sqlalchemy_file(temporary_file)
+        instance.to_sqlalchemy_file(file=temporary_file)
         temporary_path = temporary_file.name
     os.replace(temporary_path, file_path)
 
@@ -147,16 +165,8 @@ def pytest_configure(config):
     logging.getLogger("numpy").setLevel(logging.WARNING)
 
 
-# Generate ormatic_interface.py at module level, before the star import below.
-# This must happen here (not in a pytest hook) because hooks run after the
-# conftest module is fully imported, which means the import on the next line
-# would fail if the generated file is stale or missing.
+# Generate ormatic_interface.py when this conftest is loaded, before any test imports it.
 generate_sqlalchemy_interface()
-
-try:
-    from .dataset.ormatic_interface import *
-except ImportError:
-    pass
 
 # Generate verbalization_results.py the same way: always fresh, so a wording change
 # shows up as an ordinary diff to review before committing, instead of a failing test.
@@ -202,6 +212,14 @@ def cleanup_after_test():
     SymbolGraph().clear()
 
 
+@pytest.fixture(scope="session", autouse=True)
+def register_orm_mappers() -> None:
+    """
+    Load the ORM interface, whose import registers the mappers every test may use.
+    """
+    from .dataset import ormatic_interface  # noqa: F401
+
+
 @pytest.fixture(scope="session")
 def engine():
     configure_mappers()
@@ -220,6 +238,12 @@ def session(engine):
 
 @pytest.fixture
 def database(engine, session):
+    """
+    Create the tables of the test ORM interface for the test, and drop the database
+    after it.
+    """
+    from .dataset.ormatic_interface import Base
+
     Base.metadata.create_all(engine)
     yield
     drop_database(engine)

@@ -7,11 +7,13 @@ number of the wrong things fails. Every name is checked against the world itself
 missing annotation.
 """
 
+from copy import deepcopy
 from enum import StrEnum
 
 import pytest
-from typing_extensions import List, Set, Type
 
+from krrood.class_diagrams.class_diagram import ClassDiagram
+from krrood.symbol_graph.symbol_graph import SymbolGraph
 from semantic_digital_twin.reasoning.world_reasoner import WorldReasoner
 from semantic_digital_twin.semantic_annotations.mixins import HasRootBody
 from semantic_digital_twin.semantic_annotations.semantic_annotations import (
@@ -252,7 +254,7 @@ class ApartmentWardrobe(StrEnum):
 
 # %% pairing each annotation type with what it is expected on
 
-EXPECTED_BODIES: List[tuple] = [
+EXPECTED_BODIES: list[tuple] = [
     (Handle, ApartmentHandle),
     (Drawer, ApartmentDrawer),
     (Door, ApartmentDoor),
@@ -276,14 +278,14 @@ Each annotation type together with the bodies the reasoner must infer it on.
 """
 
 
-def expected_body_names(expected: Type[StrEnum]) -> Set[str]:
+def expected_body_names(expected: type[StrEnum]) -> set[str]:
     """
     The body names one of the expectations above holds.
     """
     return {member.value for member in expected}
 
 
-def inferred_body_names(world: World, annotation_type: Type[HasRootBody]) -> Set[str]:
+def inferred_body_names(world: World, annotation_type: type[HasRootBody]) -> set[str]:
     """
     The names of the bodies the world's annotations of ``annotation_type`` sit on.
 
@@ -311,13 +313,28 @@ The drawer the apartment fixture annotates by hand before any reasoning runs.
 """
 
 
+@pytest.fixture(scope="module")
+def _reasoned_apartment_setup(
+    _apartment_world_setup: World, _session_class_diagram: ClassDiagram
+) -> World:
+    """
+    The apartment with everything the reasoner can infer about it already inferred,
+    reasoned once for the module and only ever copied.
+    """
+    SymbolGraph.clear_instance()
+    SymbolGraph(_class_diagram=_session_class_diagram)
+    apartment = deepcopy(_apartment_world_setup)
+    WorldReasoner(apartment).infer_semantic_annotations()
+    return apartment
+
+
 @pytest.fixture
-def reasoned_apartment(apartment_world_copy) -> World:
+def reasoned_apartment(_reasoned_apartment_setup: World) -> World:
     """
-    The apartment with everything the reasoner can infer about it already inferred.
+    A copy of the reasoned apartment whose annotations are in the symbol graph of the
+    test that uses it.
     """
-    WorldReasoner(apartment_world_copy).infer_semantic_annotations()
-    return apartment_world_copy
+    return deepcopy(_reasoned_apartment_setup)
 
 
 @pytest.mark.parametrize(
@@ -326,8 +343,8 @@ def reasoned_apartment(apartment_world_copy) -> World:
     ids=[annotation_type.__name__ for annotation_type, _ in EXPECTED_BODIES],
 )
 def test_every_expected_body_exists(
-    annotation_type: Type[HasRootBody],
-    expected: Type[StrEnum],
+    annotation_type: type[HasRootBody],
+    expected: type[StrEnum],
     apartment_world_copy: World,
 ):
     """
@@ -343,8 +360,8 @@ def test_every_expected_body_exists(
     ids=[annotation_type.__name__ for annotation_type, _ in EXPECTED_BODIES],
 )
 def test_annotations_sit_on_the_expected_bodies(
-    annotation_type: Type[HasRootBody],
-    expected: Type[StrEnum],
+    annotation_type: type[HasRootBody],
+    expected: type[StrEnum],
     reasoned_apartment: World,
 ):
     """
@@ -497,6 +514,15 @@ def test_every_openable_part_hangs_on_the_joint_that_moves_it(
         assert isinstance(door.movable_joint, RevoluteConnection)
 
     assert reasoned_apartment.validate()
+
+
+def test_the_inferred_annotations_are_in_the_symbol_graph(reasoned_apartment: World):
+    """
+    Queries over the symbol graph find the annotations the reasoner inferred.
+    """
+    drawers = set(reasoned_apartment.get_semantic_annotations_by_type(Drawer))
+    assert drawers
+    assert drawers <= set(SymbolGraph().get_instances_of_type(type_=Drawer))
 
 
 # %% what the reasoner leaves alone

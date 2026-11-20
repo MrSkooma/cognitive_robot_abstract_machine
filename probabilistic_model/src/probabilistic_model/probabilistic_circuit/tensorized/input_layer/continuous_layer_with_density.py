@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import copy
 import dataclasses
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
 from random_events.interval import Bound, Interval, SimpleInterval
-from typing_extensions import List, Self, Type
+from typing_extensions import Any, Self
 
 from probabilistic_model.exceptions import ShapeMismatchError
 from probabilistic_model.probabilistic_circuit.tensorized.array_types import (
+    BackendArray,
     NodeIntervalBounds,
     NodeIntervals,
     NodeMask,
@@ -58,7 +60,7 @@ class ContinuousLayerWithDensity(AbstractContinuousLayer, ABC):
 
     def type_of_layer_truncated_to_interval(
         self, interval: SimpleInterval
-    ) -> Type[Layer]:
+    ) -> type[Layer]:
         """
         :param interval: A simple interval that is not a singleton.
         :return: The type of the layer :meth:`log_truncated_of_non_singleton_interval`
@@ -68,7 +70,7 @@ class ContinuousLayerWithDensity(AbstractContinuousLayer, ABC):
 
     def type_of_truncated_layer(
         self, assignment: Interval, singleton_allowed: bool
-    ) -> Type[Layer]:
+    ) -> type[Layer]:
         if len(assignment.simple_sets) > 1:
             return SumLayer
         if not assignment.simple_sets:
@@ -87,7 +89,7 @@ class ContinuousLayerWithDensity(AbstractContinuousLayer, ABC):
         ]
         if not pieces:
             return LayerWithLogProbabilities(
-                self.__deepcopy__(), np.full(self.number_of_nodes, -np.inf)
+                copy.deepcopy(self), np.full(self.number_of_nodes, -np.inf)
             )
         if len(pieces) == 1:
             return pieces[0]
@@ -127,9 +129,10 @@ class ContinuousLayerWithDensity(AbstractContinuousLayer, ABC):
 
 
 @dataclass(eq=False, repr=False)
-class ContinuousLayerWithFiniteSupport(ContinuousLayerWithDensity, ABC):
+class ContinuousLayerWithConstrainedSupport(ContinuousLayerWithDensity, ABC):
     """
-    Abstract base class for continuous input layers whose nodes have a finite support.
+    Abstract base class for continuous input layers whose nodes have a constrained
+    support.
     """
 
     interval: NodeIntervals
@@ -142,6 +145,14 @@ class ContinuousLayerWithFiniteSupport(ContinuousLayerWithDensity, ABC):
     Whether the lower and upper bound of every node are open or closed, as
     :class:`random_events.interval.Bound` values of shape (#nodes, 2).
     """
+
+    @property
+    def parameters(self) -> list[BackendArray]:
+        return [self.interval]
+
+    def copy_with_parameters(self, parameters: list[BackendArray]) -> Self:
+        (interval,) = parameters
+        return dataclasses.replace(self, interval=interval)
 
     @property
     def lower(self) -> NodeValues:
@@ -198,18 +209,22 @@ class ContinuousLayerWithFiniteSupport(ContinuousLayerWithDensity, ABC):
         :param values: The values with shape (#events,).
         :return: A boolean array of shape (#events, #nodes).
         """
-        column = np.asarray(values, dtype=float).reshape(-1, 1)
+        column = self.float_column(values=values)
 
         # these arrays hold one entry per event per node, so the homogeneous cases get
         # their own path rather than evaluating both comparisons and selecting between
-        # them
+        # them; the bounds are structure, so this branches on the host only
         left_closed = self.left_closed
         if left_closed.all():
             left = self.lower <= column
         elif not left_closed.any():
             left = self.lower < column
         else:
-            left = np.where(left_closed, self.lower <= column, self.lower < column)
+            left = self.namespace.where(
+                self.namespace.asarray(left_closed, device=self.device),
+                self.lower <= column,
+                self.lower < column,
+            )
 
         right_closed = self.right_closed
         if right_closed.all():
@@ -217,7 +232,11 @@ class ContinuousLayerWithFiniteSupport(ContinuousLayerWithDensity, ABC):
         elif not right_closed.any():
             right = column < self.upper
         else:
-            right = np.where(right_closed, column <= self.upper, column < self.upper)
+            right = self.namespace.where(
+                self.namespace.asarray(right_closed, device=self.device),
+                column <= self.upper,
+                column < self.upper,
+            )
 
         return left & right
 
@@ -236,8 +255,9 @@ class ContinuousLayerWithFiniteSupport(ContinuousLayerWithDensity, ABC):
         self, interval: SimpleInterval
     ) -> LayerWithLogProbabilities:
         """
-        Truncate every node to a simple interval. A node keeps its shape on the
-        intersection of its support and the interval.
+        Truncate every node to a simple interval.
+
+        A node keeps its shape on the intersection of its support and the interval.
 
         :param interval: The simple interval, which is not a singleton.
         :return: The layer over the intersections and the log-probability of the
@@ -291,7 +311,7 @@ class ContinuousLayerWithFiniteSupport(ContinuousLayerWithDensity, ABC):
         return self.__class__(self.variable, self.interval[mask], self.bounds[mask])
 
     @classmethod
-    def concatenate(cls, layers: List[Self]) -> Self:
+    def concatenate(cls, layers: list[Self]) -> Self:
         return cls(
             layers[0].variable,
             np.concatenate([layer.interval for layer in layers]),
@@ -308,12 +328,3 @@ class ContinuousLayerWithFiniteSupport(ContinuousLayerWithDensity, ABC):
 
     def apply_scaling_own(self, scaling: VariableValues):
         self.interval = self.interval * scaling[self.variable]
-
-    def __deepcopy__(self, memo=None) -> Self:
-        if memo is None:
-            memo = {}
-        if id(self) in memo:
-            return memo[id(self)]
-        result = self.__class__(self.variable, self.interval.copy(), self.bounds.copy())
-        memo[id(self)] = result
-        return result

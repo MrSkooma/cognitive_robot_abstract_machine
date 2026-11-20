@@ -1,64 +1,56 @@
+"""
+Goals that shape a motion by scaling the weights of the other tasks.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import krrood.symbolic_math.symbolic_math as sm
-from giskardpy.motion_statechart.context import MotionStatechartContext
-from giskardpy.motion_statechart.graph_node import ConvergingTask, NodeArtifacts
-from semantic_digital_twin.world_description.world_entity import Body
+from giskardpy.motion_statechart.graph_node import ConvergingTask, MotionNodeArtifacts
+from giskardpy.motion_statechart.mixins import HasKinematicChainParameter
 
 
-@dataclass
-class MaxManipulability(ConvergingTask):
+@dataclass(eq=False, repr=False, kw_only=True)
+class MaxManipulability(ConvergingTask, HasKinematicChainParameter):
     """
-    This goal maximizes the manipulability of the kinematic chain between root_link and
-    tip_link.
+    This goal maximizes the manipulability of :attr:`kinematic_chain`.
 
     This chain should only include rotational joint and no linear joints i.e. torso lift
     joints or odometry joints.
     """
 
-    root_link: Body = field(kw_only=True)
+    goal_manipulability: float = 0.5
     """
-    The root of the kinematic chain whose manipulability is maximized.
-    """
-
-    tip_link: Body = field(kw_only=True)
-    """
-    The tip of the kinematic chain whose manipulability is maximized.
+    The manipulability measure of the chain this task drives towards.
     """
 
-    manipulability_threshold: float = field(default=0.5, kw_only=True)
-    """
-    Manipulability value the goal drives the measure towards.
-    """
-
-    def build_artifacts(self, context: MotionStatechartContext) -> NodeArtifacts:
+    def build_artifacts(self) -> MotionNodeArtifacts:
         """
         Build a constraint that drives the manipulability measure towards
-        :attr:`manipulability_threshold`.
+        :attr:`goal_manipulability`.
 
-        :param context: Provides access to world model and kinematic expressions.
         :return: The artifacts of this task, whose error is how far the manipulability measure is from its target value.
         """
-        artifacts = NodeArtifacts()
-        root_P_tip = context.world.compose_forward_kinematics_expression(
-            self.root_link, self.tip_link
+        artifacts = MotionNodeArtifacts()
+        root_P_tip = self.context.world.compose_forward_kinematics_expression(
+            self.kinematic_chain.root, self.kinematic_chain.tip
         ).position[:3]
 
         joint_symbols = root_P_tip.free_variables()
         position_expression = sm.vstack([root_P_tip])
-        jacobian = position_expression.jacobian(joint_symbols)
-        jacobian_gram = jacobian.dot(jacobian.T)
+        jacobian = position_expression.jacobian(variables=joint_symbols)
+        jacobian_gram = jacobian.dot(other=jacobian.T)
         manipulability = sm.sqrt(jacobian_gram.det())
 
         artifacts.geometry.add_position_constraint(
-            reference_velocity=1,
-            expression_goal=self.manipulability_threshold,
+            cruise_velocity=1,
+            velocity_scale=1,
+            expression_goal=self.goal_manipulability,
             quadratic_weight=1,
             expression_current=manipulability,
             name=self.name,
         )
 
-        artifacts.error = sm.abs(self.manipulability_threshold - manipulability)
+        artifacts.error = sm.abs(self.goal_manipulability - manipulability)
         return artifacts

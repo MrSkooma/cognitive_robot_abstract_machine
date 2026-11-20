@@ -1,4 +1,5 @@
 import os
+import shutil
 import subprocess
 import sys
 
@@ -23,13 +24,13 @@ from semantic_digital_twin.adapters.ros.semdt_to_ros2_converters import (
     BoxToRos2Converter,
     PoseToRos2Converter,
 )
-from semantic_digital_twin.spatial_types import (
+from krrood_spatial_math.spatial_types import (
     HomogeneousTransformationMatrix,
     Point3,
     Vector3,
     Quaternion,
 )
-from semantic_digital_twin.spatial_types.spatial_types import Pose
+from krrood_spatial_math.spatial_types import Pose
 from semantic_digital_twin.world_description.geometry import (
     Box,
     Color,
@@ -38,6 +39,9 @@ from semantic_digital_twin.world_description.geometry import (
     Sphere,
     Mesh,
 )
+
+
+# %% transforms naming both frames
 
 
 def test_convert_transform(cylinder_bot_world):
@@ -69,6 +73,53 @@ def test_convert_transform(cylinder_bot_world):
 
     transform2 = SemDTToRos2Converter.convert(transformation_matrix)
     assert transform == transform2
+
+
+# %% transforms that name fewer frames
+
+
+def test_convert_transform_without_frames(cylinder_bot_world):
+    transform = geometry_msgs.Transform()
+    transform.translation.x = 1.0
+    transform.translation.y = -2.0
+    transform.translation.z = 0.5
+    transform.rotation.z = 1.0
+    transform.rotation.w = 0.0
+
+    transformation_matrix = Ros2ToSemDTConverter.convert(
+        transform, world=cylinder_bot_world
+    )
+
+    expected = HomogeneousTransformationMatrix.from_xyz_quaternion(
+        pos_x=transform.translation.x,
+        pos_y=transform.translation.y,
+        pos_z=transform.translation.z,
+        quat_x=transform.rotation.x,
+        quat_y=transform.rotation.y,
+        quat_z=transform.rotation.z,
+        quat_w=transform.rotation.w,
+    )
+    assert (transformation_matrix.to_np() == expected.to_np()).all()
+    assert transformation_matrix.reference_frame is None
+    assert transformation_matrix.child_frame is None
+
+
+def test_convert_transform_stamped_without_a_child_frame(cylinder_bot_world):
+    transform = geometry_msgs.TransformStamped()
+    transform.header.frame_id = "map"
+    transform.transform.rotation.w = 1.0
+
+    transformation_matrix = Ros2ToSemDTConverter.convert(
+        transform, world=cylinder_bot_world
+    )
+
+    assert transformation_matrix.reference_frame == cylinder_bot_world.get_body_by_name(
+        "map"
+    )
+    assert transformation_matrix.child_frame is None
+
+
+# %% other spatial messages
 
 
 def test_convert_point_stamped(cylinder_bot_world):
@@ -193,17 +244,25 @@ def test_convert_pose(cylinder_bot_world):
 
 
 def test_no_frame_id(cylinder_bot_world):
-    SemDTToRos2Converter.convert(HomogeneousTransformationMatrix())
-    SemDTToRos2Converter.convert(Pose())
-    SemDTToRos2Converter.convert(Point3())
-    SemDTToRos2Converter.convert(Vector3())
-    SemDTToRos2Converter.convert(Quaternion())
+    transform = SemDTToRos2Converter.convert(HomogeneousTransformationMatrix())
+    assert transform.header.frame_id == ""
+    assert transform.child_frame_id == ""
+    for spatial_type in [Pose(), Point3(), Vector3(), Quaternion()]:
+        assert SemDTToRos2Converter.convert(spatial_type).header.frame_id == ""
 
-    Ros2ToSemDTConverter.convert(geometry_msgs.TransformStamped(), cylinder_bot_world)
-    Ros2ToSemDTConverter.convert(geometry_msgs.PointStamped(), cylinder_bot_world)
-    Ros2ToSemDTConverter.convert(geometry_msgs.QuaternionStamped(), cylinder_bot_world)
-    Ros2ToSemDTConverter.convert(geometry_msgs.Vector3Stamped(), cylinder_bot_world)
-    Ros2ToSemDTConverter.convert(geometry_msgs.PoseStamped(), cylinder_bot_world)
+    transformation_matrix = Ros2ToSemDTConverter.convert(
+        geometry_msgs.TransformStamped(), cylinder_bot_world
+    )
+    assert transformation_matrix.reference_frame is None
+    assert transformation_matrix.child_frame is None
+    for message in [
+        geometry_msgs.PointStamped(),
+        geometry_msgs.QuaternionStamped(),
+        geometry_msgs.Vector3Stamped(),
+        geometry_msgs.PoseStamped(),
+    ]:
+        spatial_type = Ros2ToSemDTConverter.convert(message, cylinder_bot_world)
+        assert spatial_type.reference_frame is None
 
 
 def test_convert_box_shape(cylinder_bot_world):
@@ -267,7 +326,7 @@ def test_convert_mesh_shape(cylinder_bot_world):
     )
     mesh = Mesh(
         filename=stl_file,
-        color=Color(0.0, 0.0, 0.0, 0.0),
+        color=Color.from_rgba(red=0.0, green=0.0, blue=0.0, opacity=0.0),
         origin=HomogeneousTransformationMatrix.from_xyz_rpy(
             1, 2, 3, reference_frame=cylinder_bot_world.get_body_by_name("map")
         ),
@@ -279,6 +338,120 @@ def test_convert_mesh_shape(cylinder_bot_world):
 
     shape2 = SemDTToRos2Converter.convert(mesh2)
     assert shape == shape2
+
+
+# %% drawing a mesh from its file
+
+
+def textured_chair(cylinder_bot_world) -> Mesh:
+    """
+    :return: A mesh whose file paints it with a texture, placed in the map of
+        `cylinder_bot_world`.
+    """
+    ply_directory = os.path.join(
+        Path(files("semantic_digital_twin")).parent.parent, "resources", "ply"
+    )
+    return Mesh.from_ply_file(
+        ply_file_path=os.path.join(ply_directory, "chair.ply"),
+        texture_file_path=os.path.join(ply_directory, "chair_texture.png"),
+        origin=HomogeneousTransformationMatrix.from_xyz_rpy(
+            reference_frame=cylinder_bot_world.get_body_by_name("map")
+        ),
+    )
+
+
+def test_a_textured_mesh_is_drawn_with_the_materials_of_its_file(cylinder_bot_world):
+    marker = SemDTToRos2Converter.convert(textured_chair(cylinder_bot_world))
+
+    assert marker.mesh_use_embedded_materials
+
+
+def test_drawing_a_mesh_leaves_its_geometry_unloaded(cylinder_bot_world):
+    """
+    The marker refers to the mesh's file, so converting it must not keep the mesh's
+    geometry and textures in memory.
+    """
+    mesh = textured_chair(cylinder_bot_world)
+
+    SemDTToRos2Converter.convert(mesh)
+
+    assert "mesh" not in vars(mesh)
+
+
+# %% mesh files that move between machines
+
+
+def map_origin(world) -> HomogeneousTransformationMatrix:
+    """
+    :return: The identity pose in the map of the given world.
+    """
+    return HomogeneousTransformationMatrix.from_xyz_rpy(
+        reference_frame=world.get_body_by_name("map")
+    )
+
+
+@pytest.fixture
+def installed_mesh_file(tmp_path, monkeypatch) -> Path:
+    """
+    :return: A mesh file in the share directory of the package ``mesh_package``, which
+        is registered in an ament prefix.
+    """
+    share = tmp_path / "share"
+    (share / "ament_index" / "resource_index" / "packages").mkdir(parents=True)
+    (share / "ament_index" / "resource_index" / "packages" / "mesh_package").touch()
+    mesh_file = share / "mesh_package" / "meshes" / "jeroen_cup.stl"
+    mesh_file.parent.mkdir(parents=True)
+    shutil.copy(
+        Path(files("semantic_digital_twin")).parent.parent
+        / "resources"
+        / "stl"
+        / "jeroen_cup.stl",
+        mesh_file,
+    )
+    monkeypatch.setenv("AMENT_PREFIX_PATH", str(tmp_path))
+    return mesh_file
+
+
+def test_a_mesh_in_a_package_is_published_by_package_uri(
+    cylinder_bot_world, installed_mesh_file
+):
+    mesh = Mesh(
+        filename=str(installed_mesh_file), origin=map_origin(cylinder_bot_world)
+    )
+
+    marker = SemDTToRos2Converter.convert(mesh)
+
+    assert marker.mesh_resource == "package://mesh_package/meshes/jeroen_cup.stl"
+
+
+def test_a_mesh_outside_any_package_is_published_by_file_uri(
+    cylinder_bot_world, tmp_path
+):
+    mesh_file = tmp_path / "jeroen_cup.stl"
+    shutil.copy(
+        Path(files("semantic_digital_twin")).parent.parent
+        / "resources"
+        / "stl"
+        / "jeroen_cup.stl",
+        mesh_file,
+    )
+    mesh = Mesh(filename=str(mesh_file), origin=map_origin(cylinder_bot_world))
+
+    marker = SemDTToRos2Converter.convert(mesh)
+
+    assert marker.mesh_resource == f"file://{mesh_file}"
+
+
+def test_a_package_uri_mesh_is_found_in_the_local_install(
+    cylinder_bot_world, installed_mesh_file
+):
+    marker = SemDTToRos2Converter.convert(
+        Mesh(filename=str(installed_mesh_file), origin=map_origin(cylinder_bot_world))
+    )
+
+    mesh = Ros2ToSemDTConverter.convert(marker, cylinder_bot_world)
+
+    assert mesh.filename == str(installed_mesh_file)
 
 
 # %% nothing converts the given object

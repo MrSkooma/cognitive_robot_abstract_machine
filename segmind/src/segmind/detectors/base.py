@@ -1,18 +1,19 @@
+"""
+The base classes of segmind's event detectors and the context extension they share.
+"""
+
 from __future__ import annotations
 
 from abc import abstractmethod, ABC
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Set, List, Any, Sequence, Tuple, Type
+from typing_extensions import TypeVar, Any, Sequence
 
-from typing_extensions import TypeVar
 
-from giskardpy.motion_statechart.context import (
-    MotionStatechartContext,
-    ContextExtension,
-)
-from giskardpy.motion_statechart.data_types import ObservationStateValues
-from giskardpy.motion_statechart.graph_node import MotionStatechartNode, NodeArtifacts
-from giskardpy.motion_statechart.motion_statechart import MotionStatechart
+from krrood.patterns.classproperty import classproperty
+from cramph.node import EndedByOwner
+from cramph.context import ContextExtension
+from cramph.data_types import ObservationStateValue
+from cramph.node import StatechartNode
 from krrood.entity_query_language.predicate import Triple
 from segmind.datastructures.events import MotionEvent, DetectionEvent, RotationEvent
 from segmind.datastructures.object_tracker import ObjectTrackerFactory
@@ -23,18 +24,7 @@ from semantic_digital_twin.world import World
 from semantic_digital_twin.world_description.connections import Connection6DoF
 from semantic_digital_twin.world_description.world_entity import Body
 
-
-@dataclass
-class DetectorStateChart(MotionStatechart):
-    """
-    Statechart responsible for running the different motion detectors.
-
-    Currently acts as a container for the detectors and inherits the
-    functionality from MotionStatechart.
-    """
-
-
-IndexedBodyPairs = Dict[Body, Set[Body]]
+IndexedBodyPairs = dict[Body, set[Body]]
 """
 Type hint for dictionaries mapping bodies to sets of bodies
 """
@@ -45,10 +35,10 @@ A relation whose subject and object are both bodies.
 """
 
 
-@dataclass
+@dataclass(kw_only=True)
 class SegmindContext(ContextExtension):
     """
-    Context object shared across the motion statechart detectors.
+    Context object shared across the statechart detectors.
 
     Stores the latest detected contact and support relationships
     between bodies in the simulation as well as the event logger.
@@ -74,12 +64,12 @@ class SegmindContext(ContextExtension):
     Dictionary mapping each body to the set of bodies that currently contain it.
     """
 
-    latest_motion_events: Dict[Body, MotionEvent] = field(default_factory=dict)
+    latest_motion_events: dict[Body, MotionEvent] = field(default_factory=dict)
     """
     Dictionary mapping each body to its currently active motion event, if any.
     """
 
-    latest_rotation_events: Dict[Body, RotationEvent] = field(default_factory=dict)
+    latest_rotation_events: dict[Body, RotationEvent] = field(default_factory=dict)
     """
     Dictionary mapping each body to its currently active rotation event, if any.
     """
@@ -101,7 +91,7 @@ class SegmindContext(ContextExtension):
     Set of placing pairs, to avoid duplicate events
     """
 
-    holes: List[Aperture] = field(default_factory=list)
+    holes: list[Aperture] = field(default_factory=list)
     """
     List of bodies that can be considered holes
     """
@@ -117,19 +107,19 @@ class SegmindContext(ContextExtension):
     """
 
 
-@dataclass(repr=False, eq=False)
-class AbstractDetector(MotionStatechartNode, ABC):
+@dataclass(repr=False, eq=False, kw_only=True)
+class AbstractDetector(EndedByOwner, StatechartNode, ABC):
     """
     Abstract base class for all detectors.
     """
 
-    tracked_object: Optional[Body] = field(kw_only=True, default=None)
+    tracked_object: Body | None = None
     """
-    :param tracked_object: Optional body that should be monitored.
-    If None, all trackable objects in the world are checked.
+    Optional body that should be monitored. If None, all trackable objects in the world
+    are checked.
     """
 
-    exclude_robot: bool = field(kw_only=True, default=True)
+    exclude_robot: bool = True
     """
     Whether every body of every robot is left out of what a tracked object is checked
     against.
@@ -138,9 +128,11 @@ class AbstractDetector(MotionStatechartNode, ABC):
     throughout; what the robot does with it is read from the grasp instead.
     """
 
-    def on_tick(
-        self, context: MotionStatechartContext
-    ) -> Optional[ObservationStateValues]:
+    @classproperty
+    def required_context_extensions(cls) -> tuple[type[ContextExtension], ...]:
+        return super().required_context_extensions + (SegmindContext,)
+
+    def on_tick(self) -> ObservationStateValue | None:
         """
         Executes one update cycle of the detector.
 
@@ -148,32 +140,33 @@ class AbstractDetector(MotionStatechartNode, ABC):
         computes new contact relationships, and triggers events if
         contact changes are detected.
 
-        :param context: The current motion statechart context.
-        :return: ObservationStateValues.TRUE if events were triggered,
-        otherwise ObservationStateValues.FALSE.
+        :return: ObservationStateValue.TRUE if events were triggered,
+        otherwise ObservationStateValue.FALSE.
         """
-        segmind_context_extension = context.require_extension(SegmindContext)
+        segmind_context_extension = self.context.require_extension(
+            extension_type=SegmindContext
+        )
 
         objects_to_check = (
             [self.tracked_object]
             if self.tracked_object
             else [
                 body
-                for body in context.world.bodies
+                for body in self.context.world.bodies
                 if type(body.parent_connection) is Connection6DoF
             ]
         )
         events = self.update_context_and_events(
-            context, segmind_context_extension, objects_to_check
+            segmind_context_extension, objects_to_check
         )
         for event in events:
             segmind_context_extension.logger.log_event(
                 event, segmind_context_extension.tracker_registry
             )
-        return ObservationStateValues.TRUE if events else ObservationStateValues.FALSE
+        return ObservationStateValue.TRUE if events else ObservationStateValue.FALSE
 
     @classmethod
-    def get_required_detector_types(cls) -> Tuple[Type[AbstractDetector], ...]:
+    def get_required_detector_types(cls) -> tuple[type[AbstractDetector], ...]:
         """
         :return: The kinds of detector whose events this one is read from. A run using
             this detector uses them too.
@@ -184,8 +177,8 @@ class AbstractDetector(MotionStatechartNode, ABC):
     def create_for_run(
         cls,
         watched_bodies: Sequence[Body],
-        detector_types: Sequence[Type[AbstractDetector]],
-    ) -> List[AbstractDetector]:
+        detector_types: Sequence[type[AbstractDetector]],
+    ) -> list[AbstractDetector]:
         """
         The detectors of this kind a run ticks: one for each body it watches.
 
@@ -217,7 +210,7 @@ class AbstractDetector(MotionStatechartNode, ABC):
 
     @staticmethod
     def forget_lost_relations(
-        remembered: IndexedBodyPairs, holding: IndexedBodyPairs, bodies: List[Body]
+        remembered: IndexedBodyPairs, holding: IndexedBodyPairs, bodies: list[Body]
     ) -> IndexedBodyPairs:
         """
         Forget the relations of ``bodies`` that no longer hold.
@@ -246,7 +239,7 @@ class AbstractDetector(MotionStatechartNode, ABC):
         return lost
 
     @staticmethod
-    def end_effector_bodies(world: World) -> Set[Body]:
+    def end_effector_bodies(world: World) -> set[Body]:
         """
         The bodies of every end effector in ``world``.
         """
@@ -257,7 +250,7 @@ class AbstractDetector(MotionStatechartNode, ABC):
         }
 
     @classmethod
-    def bodies_outside_end_effectors(cls, world: World) -> List[Body]:
+    def bodies_outside_end_effectors(cls, world: World) -> list[Body]:
         """
         The collidable bodies of ``world`` that are part of no end effector.
 
@@ -271,7 +264,7 @@ class AbstractDetector(MotionStatechartNode, ABC):
             if body not in end_effector_bodies
         ]
 
-    def bodies_left_out(self, world: World) -> Set[Body]:
+    def bodies_left_out(self, world: World) -> set[Body]:
         """
         The bodies of ``world`` a tracked object is never checked against: every body of
         every robot, unless :attr:`exclude_robot` says otherwise.
@@ -280,44 +273,44 @@ class AbstractDetector(MotionStatechartNode, ABC):
 
     def get_relation(
         self,
-        context: MotionStatechartContext,
-        tracked_objects: List[Body],
-        relation: Type[BodyRelation],
-        candidates: Optional[List[Body]] = None,
-    ) -> Dict[Body, Set[Body]]:
+        tracked_objects: list[Body],
+        relation: type[BodyRelation],
+        candidates: list[Body] | None = None,
+    ) -> dict[Body, set[Body]]:
         """
         Get the relation between tracked objects.
 
-        :param context: The context containing world information.
         :param tracked_objects: List of bodies to check for contact changes.
         :param relation: The relation between two bodies, with each tracked body as its
             subject and each other body as its object.
         :param candidates: The bodies a tracked object may be related to; every
             collidable body of the world when not given. The bodies
             :meth:`bodies_left_out` names are left out of them.
-        :return: Dictionary mapping bodies to sets of related bodies.
+        :return: Dictionary mapping bodies to sets of related bodies; a tracked body
+            without collision geometry is related to none.
         """
 
-        related_bodies: Dict[Body, Set[Body]] = {}
+        related_bodies: dict[Body, set[Body]] = {}
         if candidates is None:
-            candidates = context.world.bodies_with_collision
-        left_out = self.bodies_left_out(context.world)
+            candidates = self.context.world.bodies_with_collision
+        left_out = self.bodies_left_out(self.context.world)
         candidates = [body for body in candidates if body not in left_out]
         for tracked_object in tracked_objects:
+            if not tracked_object.has_collision():
+                continue
             for body in candidates:
                 if body is tracked_object:
                     continue
-                if relation.from_subject_object(tracked_object, body)():
+                if relation.from_subject_object(subject=tracked_object, object_=body)():
                     related_bodies.setdefault(tracked_object, set()).add(body)
         return related_bodies
 
     @abstractmethod
     def update_context_and_events(
         self,
-        context: MotionStatechartContext,
         segmind_context: SegmindContext,
-        tracked_objects: List[Body],
-    ) -> List[DetectionEvent]:
+        tracked_objects: list[Body],
+    ) -> list[DetectionEvent]:
         """
         Core detection logic that updates the internal state and identifies new events.
 
@@ -332,8 +325,6 @@ class AbstractDetector(MotionStatechartNode, ABC):
         * Continuous processes: e.g., ongoing motion or containment.
         * Complex interactions: e.g., insertion or picking up objects.
 
-        :param context: The shared SegmindContext containing the world state,
-                        history of relationships, and the event logger.
         :param segmind_context: The SegmindContext extension containing additional states.
         :param tracked_objects: A list of bodies that this detector should focus on
                                 during this update cycle.
@@ -343,7 +334,7 @@ class AbstractDetector(MotionStatechartNode, ABC):
         pass
 
 
-@dataclass(repr=False, eq=False)
+@dataclass(repr=False, eq=False, kw_only=True)
 class EventCombiningDetector(AbstractDetector, ABC):
     """
     A detector concluding from the events other detectors detected, over every body
@@ -354,8 +345,8 @@ class EventCombiningDetector(AbstractDetector, ABC):
     def create_for_run(
         cls,
         watched_bodies: Sequence[Body],
-        detector_types: Sequence[Type[AbstractDetector]],
-    ) -> List[AbstractDetector]:
+        detector_types: Sequence[type[AbstractDetector]],
+    ) -> list[AbstractDetector]:
         """
         The detectors of this kind a run ticks: one, for all the bodies it watches.
         """

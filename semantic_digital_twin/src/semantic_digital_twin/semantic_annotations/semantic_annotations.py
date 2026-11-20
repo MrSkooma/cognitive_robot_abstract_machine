@@ -1,15 +1,18 @@
+"""
+Semantic annotations of the furniture, appliances, doors, handles and other things a
+world contains.
+"""
+
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Iterable, Iterator, Optional, Self, Tuple, TYPE_CHECKING, Union
+from typing_extensions import Iterable, Iterator, Self, TYPE_CHECKING
 
-import math
 
 import numpy as np
-from typing_extensions import List
 
-from krrood.ormatic.utils import classproperty
+from krrood.patterns.classproperty import classproperty
 from krrood.symbolic_math import symbolic_math
 from random_events.interval import closed
 from random_events.product_algebra import SimpleEvent
@@ -18,16 +21,21 @@ from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.datastructures.variables import SpatialVariables
 from semantic_digital_twin.exceptions import (
     NoGraspGeometry,
+    HandleWiderThanLong,
     InvalidPlaneDimensions,
     InvalidHingeActiveAxis,
     MissingSemanticAnnotationError,
     MissingMovableJointError,
 )
 from semantic_digital_twin.reasoning.predicates import InsideOf
+from semantic_digital_twin.robots.exceptions import MissingMobileBaseError
+from semantic_digital_twin.robots.robot_part_mixins import HasMobileBase
 from semantic_digital_twin.semantic_annotations.part_whole import (
     IsPartWholeRelationship,
 )
 from semantic_digital_twin.semantic_annotations.mixins import (
+    HasCounterTop,
+    HasCabinets,
     HasSupportingSurface,
     HasRootRegion,
     HasDrawers,
@@ -43,24 +51,23 @@ from semantic_digital_twin.semantic_annotations.mixins import (
     HasLegs,
     HasSink,
     HasShelfLayers,
-    HasGraspCandidates,
-    HasPinchableWall,
+    IsGraspable,
     HasRim,
+    HasDrawnGraspsByDefault,
 )
-from krrood.entity_query_language.factories import and_, or_
-from krrood.entity_query_language.query.match import Match
 from semantic_digital_twin.grasping.grasp_candidates import GraspCandidate
-from semantic_digital_twin.grasping.surface_grasp import (
-    SurfaceGrasp,
-    any_surface_grasp,
-    from_any_side,
+from semantic_digital_twin.grasping.grasp_strategies import (
+    GraspABar,
+    GraspAcrossTheLength,
+    GraspStrategy,
+    PinchARim,
 )
-from semantic_digital_twin.spatial_types import (
+from krrood_spatial_math.spatial_types import (
     Point3,
     HomogeneousTransformationMatrix,
     Vector3,
 )
-from semantic_digital_twin.spatial_types.spatial_types import Pose, RotationMatrix
+from krrood_spatial_math.spatial_types import Pose, RotationMatrix
 from semantic_digital_twin.world_description.connections import (
     FixedConnection,
 )
@@ -87,7 +94,11 @@ from semantic_digital_twin.specifications.semantic_annotations import (
 )
 
 if TYPE_CHECKING:
+    from semantic_digital_twin.robots.robot_parts import AbstractRobot
     from semantic_digital_twin.world import World
+    from semantic_digital_twin.world_description.graph_of_convex_sets.boxes import (
+        PlanarGraphOfBoundingBoxes,
+    )
 
 
 @dataclass(eq=False)
@@ -98,48 +109,15 @@ class Furniture(SemanticAnnotation, ABC):
 
 
 @dataclass(eq=False)
-class Handle(HasGraspCandidates):
+class Handle(IsGraspable):
     """
     A handle is a physical entity that can be grasped by a hand or a robotic gripper to
     open or close an object.
     """
 
-    def default_grasp_candidates(self) -> List[GraspCandidate]:
-        """
-        :return: Grasps drawn uniformly from :meth:`surface_grasp_statement`.
-        """
-        return self.drawn_grasp_candidates()
-
-    def surface_grasp_statement(
-        self,
-        require_lifting: bool = False,
-        lowest_height: float = 0.1,
-        highest_height: float = 0.9,
-        shallowest_depth: float = 0.0,
-        deepest_depth: float = 0.5,
-    ) -> Match[SurfaceGrasp]:
-        """
-        :param require_lifting: Whether to ask only for grasps that lift the object.
-        :param lowest_height: The lowest height to grasp the handle at, as a fraction
-            of its bounding box from its bottom to its top.
-        :param highest_height: The height to grasp the handle below, as such a
-            fraction.
-        :param shallowest_depth: The least depth to close the fingers at, as a fraction
-            of the handle's thinnest extent.
-        :param deepest_depth: The depth to close the fingers short of, as such a
-            fraction.
-        :return: The handle between the two heights, closing on it between the two
-            depths.
-        """
-        thinnest_extent = float(min(self.grasp_surface().extents))
-        grasp = any_surface_grasp(require_lifting)
-        return grasp.where(
-            grasp.height >= lowest_height,
-            grasp.height < highest_height,
-            grasp.depth >= shallowest_depth * thinnest_extent,
-            grasp.depth < deepest_depth * thinnest_extent,
-            *from_any_side(grasp),
-        )
+    @classproperty
+    def grasp_strategy(cls) -> GraspStrategy:
+        return GraspABar()
 
     @classmethod
     def _create_handle_geometry(
@@ -169,9 +147,9 @@ class Handle(HasGraspCandidates):
     @classmethod
     def get_default_root_kinematic_structure_entity_specification(
         cls,
-        name: Optional[str] = None,
-        scale: Optional[Scale] = None,
-        connection_specification: Optional[ConnectionSpecification] = None,
+        name: str | None = None,
+        scale: Scale | None = None,
+        connection_specification: ConnectionSpecification | None = None,
         *,
         thickness: float = 0.005,
     ) -> BodySpecification:
@@ -180,13 +158,17 @@ class Handle(HasGraspCandidates):
         generated by :meth:`create_with_new_body_in_world`.
 
         :param name: The name of bodies created from the specification.
-        :param scale: The scale of the handle. Defaults to ``Scale(0.05, 0.02, 0.1)``.
+        :param scale: The scale of the handle: depth as x, width as y and length as z.
+            Defaults to ``Scale(0.05, 0.02, 0.1)``.
         :param thickness: The thickness of the handle walls.
         :param connection_specification: Connection attaching the entity to its parent.
             ``None`` defers to the annotation type's default at spawn time.
         :return: A body specification with the handle geometry.
+        :raises HandleWiderThanLong: If the width of ``scale`` exceeds its length.
         """
         scale = scale or Scale(0.05, 0.02, 0.1)
+        if scale.y > scale.z:
+            raise HandleWiderThanLong(scale=scale)
         handle_event = cls._create_handle_geometry(scale=scale).as_composite_set()
         inner_box = cls._create_handle_geometry(
             scale=scale, thickness=thickness
@@ -197,6 +179,36 @@ class Handle(HasGraspCandidates):
             name, handle_event, connection_specification=connection_specification
         )
 
+    def default_grasp_candidates(self) -> list[GraspCandidate]:
+        """
+        The grasps at the centre of the handle's bar that close around it, one
+        approaching from each of the four sides around it.
+
+        The bar runs along the longest extent of the root's collision geometry.
+
+        :raises NoGraspGeometry: If the root body has no collision geometry to tell
+            which way the bar runs.
+        """
+        if not self.root.has_collision():
+            raise NoGraspGeometry(self)
+        mesh = self.root.combined_mesh
+        bar_axis = np.argmax(mesh.extents)
+        bar_direction = Vector3.from_iterable(np.eye(3)[bar_axis])
+        across_bar = np.delete(np.eye(3), bar_axis, axis=0)
+        return [
+            GraspCandidate(
+                self,
+                Pose(
+                    position=Point3.from_iterable(mesh.bounds.mean(axis=0)),
+                    orientation=RotationMatrix.from_vectors(
+                        x=approach, y=bar_direction.cross(approach)
+                    ).quaternion,
+                    reference_frame=self.root,
+                ),
+            )
+            for approach in map(Vector3.from_iterable, [*across_bar, *-across_bar])
+        ]
+
 
 @dataclass(eq=False)
 class Dishwasher(HasCaseAsRootBody, HasDoors, HasDrawers):
@@ -206,6 +218,19 @@ class Dishwasher(HasCaseAsRootBody, HasDoors, HasDrawers):
 
     It typically has a front door that opens to reveal racks for loading dirty items and
     a control panel for selecting wash cycles.
+    """
+
+    @classproperty
+    def _hole_direction_axis(cls) -> Vector3:
+        return Vector3.NEGATIVE_X()
+
+
+@dataclass(eq=False)
+class WashingMachine(HasCaseAsRootBody, HasDoors, HasDrawers):
+    """
+    A washing machine is a household appliance that washes laundry in a drum.
+
+    It typically has a front door to load the drum and a pull-out detergent drawer.
     """
 
     @classproperty
@@ -227,7 +252,7 @@ class Aperture(HasRootRegion):
         name: str,
         world: World,
         body: Body,
-        parent_T_self: Optional[HomogeneousTransformationMatrix] = None,
+        parent_T_self: HomogeneousTransformationMatrix | None = None,
     ) -> Self:
         world.update_forward_kinematics()
         body_scale = (
@@ -281,9 +306,9 @@ class Aperture(HasRootRegion):
     @classmethod
     def get_default_root_kinematic_structure_entity_specification(
         cls,
-        name: Optional[str] = None,
-        scale: Optional[Scale] = None,
-        connection_specification: Optional[ConnectionSpecification] = None,
+        name: str | None = None,
+        scale: Scale | None = None,
+        connection_specification: ConnectionSpecification | None = None,
     ) -> RegionSpecification:
         """
         Build the default region specification whose ``area`` geometry matches what
@@ -316,11 +341,11 @@ class EntryWay(Aperture):
     @classmethod
     def get_default_root_kinematic_structure_entity_specification(
         cls,
-        name: Optional[str] = None,
-        scale: Optional[Scale] = None,
-        connection_specification: Optional[ConnectionSpecification] = None,
+        name: str | None = None,
+        scale: Scale | None = None,
+        connection_specification: ConnectionSpecification | None = None,
         *,
-        color: Optional[Color] = None,
+        color: Color | None = None,
     ) -> RegionSpecification:
         """
         Build the default entry way region specification: a box coextensive with the
@@ -336,7 +361,7 @@ class EntryWay(Aperture):
         return RegionSpecification.box(
             name,
             scale or Scale(),
-            color=color or Color(R=1.0, G=1.0, B=1.0, A=0.2),
+            color=color or Color.from_rgba(red=1.0, green=1.0, blue=1.0, opacity=0.2),
             connection_specification=connection_specification,
         )
 
@@ -348,7 +373,7 @@ class Door(HasHandle, HasMovableJoint):
     handle.
     """
 
-    entry_way: Optional[EntryWay] = field(
+    entry_way: EntryWay | None = field(
         default=None, metadata=IsPartWholeRelationship().as_dict()
     )
     """
@@ -372,9 +397,9 @@ class Door(HasHandle, HasMovableJoint):
         name: str,
         root_specification: KinematicStructureEntitySpecification,
         *,
-        parent_connection_specification: Optional[ConnectionSpecification] = None,
-        annotation_kwargs: Optional[dict] = None,
-        part_specifications: Optional[dict] = None,
+        parent_connection_specification: ConnectionSpecification | None = None,
+        annotation_kwargs: dict | None = None,
+        part_specifications: dict | None = None,
     ) -> SemanticAnnotationWithRootSpecification[Self]:
         """
         Extend the door specification with its entry way, declared as a nested part so a
@@ -414,9 +439,9 @@ class Door(HasHandle, HasMovableJoint):
     @classmethod
     def get_default_root_kinematic_structure_entity_specification(
         cls,
-        name: Optional[str] = None,
-        scale: Optional[Scale] = None,
-        connection_specification: Optional[ConnectionSpecification] = None,
+        name: str | None = None,
+        scale: Scale | None = None,
+        connection_specification: ConnectionSpecification | None = None,
     ) -> BodySpecification:
         """
         Build the default door body specification.
@@ -501,7 +526,7 @@ class DoubleDoor(SemanticAnnotation):
 
     def calculate_left_right_door_from_view_point(
         self, world_T_view_point: HomogeneousTransformationMatrix
-    ) -> Tuple[Door, Door]:
+    ) -> tuple[Door, Door]:
         """
         Calculate which door is the left and which is the right door based on a given
         view point.
@@ -537,18 +562,6 @@ class Drawer(Furniture, HasCaseAsRootBody, HasHandle, HasMovableJoint):
         :return: The identity: the rails' frame is the drawer's frame.
         """
         return HomogeneousTransformationMatrix()
-
-    @property
-    def opening_ratio(self) -> float:
-        """
-        :return: How far this drawer stands pulled out, as a fraction of its travel.
-        """
-        if self.movable_joint is None:
-            raise MissingMovableJointError(self)
-        limits = self.movable_joint.dof.limits
-        return (self.movable_joint.position - limits.lower.position) / (
-            limits.upper.position - limits.lower.position
-        )
 
 
 @dataclass(eq=False)
@@ -643,6 +656,15 @@ class CounterTop(Furniture, HasSupportingSurface, HasSink):
 
 
 @dataclass(eq=False)
+class KitchenIsland(Furniture, HasRootBody, HasCabinets, HasCounterTop, HasDoors):
+    """
+    A run of kitchen cabinets standing free of the walls, under one counter top.
+    """
+
+    _synonyms = {"kitchen_island", "island"}
+
+
+@dataclass(eq=False)
 class Cabinet(Furniture, HasCaseAsRootBody, HasDoors, HasDrawers):
     @classproperty
     def _hole_direction_axis(cls) -> Vector3:
@@ -651,6 +673,19 @@ class Cabinet(Furniture, HasCaseAsRootBody, HasDoors, HasDrawers):
 
 @dataclass(eq=False)
 class Fridge(Cabinet): ...
+
+
+@dataclass(eq=False)
+class TumbleDryer(HasCaseAsRootBody, HasDoors, HasDrawers):
+    """
+    A tumble dryer is a household appliance that dries laundry in a rotating drum.
+
+    It typically has a front door to load the drum and a pull-out water tank.
+    """
+
+    @classproperty
+    def _hole_direction_axis(cls) -> Vector3:
+        return Vector3.NEGATIVE_X()
 
 
 @dataclass(eq=False)
@@ -671,13 +706,37 @@ class Wardrobe(Cabinet): ...
 
 @dataclass(eq=False)
 class Floor(HasSupportingSurface):
+    """
+    A floor that robots and furniture stand on.
+    """
+
+    def navigable_space(
+        self, *, robot: AbstractRobot, margin: float
+    ) -> PlanarGraphOfBoundingBoxes:
+        """
+        :param robot: A robot with a mobile base, standing on this floor.
+        :param margin: How far, beyond its radius, the base is to keep from obstacles.
+        :return: The free space above this floor that the robot's base can stand in,
+            kept clear of every obstacle up to the robot's height by the base's radius
+            and ``margin``.
+        :raises MissingMobileBaseError: If the robot has no mobile base.
+        """
+        if not isinstance(robot, HasMobileBase):
+            raise MissingMobileBaseError(robot_part=robot)
+        return self.planar_free_space(
+            max_height=robot.as_bounding_box_collection_in_frame(robot.root)
+            .bounding_box()
+            .scale.z,
+            bloat_obstacles=robot.mobile_base.base_radius + margin,
+        )
+
     @classmethod
     def create_with_new_body_from_polytope_in_world(
         cls,
         name: str,
         world: World,
-        floor_polytope: List[Point3],
-        world_root_T_self: Optional[HomogeneousTransformationMatrix] = None,
+        floor_polytope: list[Point3],
+        world_root_T_self: HomogeneousTransformationMatrix | None = None,
     ) -> Self:
         """
         Create a Floor semantic annotation with a new body defined by the given list of
@@ -694,9 +753,9 @@ class Floor(HasSupportingSurface):
     @classmethod
     def get_default_root_kinematic_structure_entity_specification(
         cls,
-        name: Optional[str] = None,
-        scale: Optional[Scale] = None,
-        connection_specification: Optional[ConnectionSpecification] = None,
+        name: str | None = None,
+        scale: Scale | None = None,
+        connection_specification: ConnectionSpecification | None = None,
     ) -> BodySpecification:
         """
         Build the default floor body specification, matching the convex-hull polytope
@@ -752,7 +811,7 @@ class Level(HasRootRegion):
     """
 
     @property
-    def floor_plane(self) -> Tuple[Point3, Point3]:
+    def floor_plane(self) -> tuple[Point3, Point3]:
         """
         The floor plane of a level, expressed as two points
 
@@ -802,7 +861,7 @@ class Wall(HasApertures):
             for door in self._world.get_semantic_annotations_by_type(Door)
             if door.entry_way
             and InsideOf(
-                door.entry_way.root, self.root, minimum_containment_ratio=0.1
+                body=door.entry_way.root, other=self.root, minimum_containment_ratio=0.1
             )()
         ]
 
@@ -830,9 +889,9 @@ class Wall(HasApertures):
     @classmethod
     def get_default_root_kinematic_structure_entity_specification(
         cls,
-        name: Optional[str] = None,
-        scale: Optional[Scale] = None,
-        connection_specification: Optional[ConnectionSpecification] = None,
+        name: str | None = None,
+        scale: Scale | None = None,
+        connection_specification: ConnectionSpecification | None = None,
     ) -> BodySpecification:
         """
         Build the default wall body specification, matching the geometry generated by
@@ -884,21 +943,21 @@ class Wall(HasApertures):
 
 
 @dataclass(eq=False)
-class Container(HasGraspCandidates):
+class Container(IsGraspable):
     """
     An object that holds contents and has an opening they go in and out through.
     """
 
 
 @dataclass(eq=False)
-class Cookware(HasGraspCandidates):
+class Cookware(IsGraspable):
     """
     An object used to cook with.
     """
 
 
 @dataclass(eq=False)
-class Tableware(HasGraspCandidates):
+class Tableware(IsGraspable):
     """
     An object a table is set with for a meal.
     """
@@ -912,7 +971,10 @@ class Bottle(Container):
 
 
 @dataclass(eq=False)
-class Statue(HasGraspCandidates): ...
+class Statue(IsGraspable):
+    """
+    A sculpture small enough to be picked up.
+    """
 
 
 @dataclass(eq=False)
@@ -998,32 +1060,14 @@ class Plate(HasSupportingSurface, Tableware):
 
 
 @dataclass(eq=False)
-class Rim(HasPinchableWall):
+class Rim(HasDrawnGraspsByDefault):
     """
     The upper edge of an open container's wall, which a gripper pinches from above.
     """
 
-    def default_grasp_candidates(self) -> List[GraspCandidate]:
-        """
-        :return: Grasps drawn uniformly from :meth:`surface_grasp_statement`.
-        """
-        return self.drawn_grasp_candidates()
-
-    def surface_grasp_statement(
-        self,
-        require_lifting: bool = False,
-        lowest_height: float = 0.25,
-        highest_height: float = 0.75,
-    ) -> Match[SurfaceGrasp]:
-        """
-        :param require_lifting: Whether to ask only for grasps that lift the container.
-        :param lowest_height: The lowest height to pinch the rim at, as a fraction of
-            its height.
-        :param highest_height: The height to pinch the rim below, as such a fraction.
-        :return: The rim between the two heights, pinched across its wall.
-        :raises NoGraspGeometry: If the rim has no wall to measure.
-        """
-        return self.wall_grasp_statement(lowest_height, highest_height, require_lifting)
+    @classproperty
+    def grasp_strategy(cls) -> GraspStrategy:
+        return PinchARim()
 
 
 @dataclass(eq=False)
@@ -1036,7 +1080,7 @@ class Bowl(HasRim, HasSupportingSurface, Container, Tableware, IsPerceivable):
 
 # Food Items
 @dataclass(eq=False)
-class Food(HasGraspCandidates):
+class Food(IsGraspable):
     """
     A Group class for Food.
     """
@@ -1237,7 +1281,7 @@ class Desk(Table, HasLegs):
 
 
 @dataclass(eq=False)
-class Chair(Furniture):
+class Chair(Furniture, HasRootBody):
     """
     Abstract class for chairs.
     """
@@ -1315,7 +1359,10 @@ class WallDecor(Decor):
 
 
 @dataclass(eq=False)
-class Cloth(HasGraspCandidates): ...
+class Cloth(IsGraspable):
+    """
+    A piece of fabric, such as a towel or a rag.
+    """
 
 
 @dataclass(eq=False)
@@ -1373,12 +1420,12 @@ class Vase(Container):
 
 
 @dataclass(eq=False)
-class Book(HasGraspCandidates):
+class Book(IsGraspable):
     """
     A book.
     """
 
-    book_front: Optional[BookFront] = None
+    book_front: BookFront | None = None
 
 
 @dataclass(eq=False)
@@ -1398,7 +1445,7 @@ class Cutlery(HasHandle, Tableware):
     A piece of cutlery, lying flat, grasped from above and across its length.
     """
 
-    def default_grasp_candidates(self) -> List[GraspCandidate]:
+    def default_grasp_candidates(self) -> list[GraspCandidate]:
         """
         :return: The grasp from above that closes across the piece, which lies flat.
         :raises NoGraspGeometry: If the root body has no collision geometry to tell
@@ -1424,64 +1471,9 @@ class Cutlery(HasHandle, Tableware):
             )
         ]
 
-    def surface_grasp_statement(
-        self,
-        require_lifting: bool = False,
-        lowest_height: float = 0.2,
-        highest_height: float = 0.8,
-        shallowest_depth: float = 0.2,
-        deepest_depth: float = 0.6,
-        azimuth_tolerance: float = np.pi / 16,
-        largest_pitch: float = 0.6,
-        largest_roll: float = np.pi / 8,
-    ) -> Match[SurfaceGrasp]:
-        """
-        :param require_lifting: Whether to ask only for grasps that lift the object.
-        :param lowest_height: The lowest height to grasp at, as a fraction of the grasp
-            surface's bounding box from its bottom to its top.
-        :param highest_height: The height to grasp below, as such a fraction.
-        :param shallowest_depth: The least depth to close the fingers at, as a fraction
-            of the piece's length.
-        :param deepest_depth: The depth to close the fingers short of, as such a
-            fraction.
-        :param azimuth_tolerance: How far off its length axis the piece may be seen
-            from, either way, in radians.
-        :param largest_pitch: How far the approach may tilt off vertical, in radians.
-        :param largest_roll: How far the fingers may turn off closing across the
-            length, either way, in radians.
-        :return: Seen along its length from either end, the stretch between the two
-            depths, closing across it.
-        :raises NoGraspGeometry: If the root body has no shape to measure.
-        """
-        lowest, highest = self.grasp_surface().bounds
-        extents = highest - lowest
-        length_axis = max(
-            (Vector3.X().to_np()[:3], Vector3.Y().to_np()[:3]),
-            key=lambda axis: np.dot(extents, axis),
-        )
-        length = float(np.dot(extents, length_axis))
-        azimuth_of_length_axis = math.atan2(length_axis[1], length_axis[0])
-        end_azimuths = (azimuth_of_length_axis, azimuth_of_length_axis + np.pi)
-        grasp = any_surface_grasp(require_lifting)
-        return grasp.where(
-            grasp.height >= lowest_height,
-            grasp.height < highest_height,
-            grasp.depth >= shallowest_depth * length,
-            grasp.depth < deepest_depth * length,
-            or_(
-                *(
-                    and_(
-                        grasp.azimuth >= end_azimuth - azimuth_tolerance,
-                        grasp.azimuth < end_azimuth + azimuth_tolerance,
-                    )
-                    for end_azimuth in end_azimuths
-                )
-            ),
-            grasp.pitch >= 0.0,
-            grasp.pitch < largest_pitch,
-            grasp.roll >= np.pi / 2 - largest_roll,
-            grasp.roll < np.pi / 2 + largest_roll,
-        )
+    @classproperty
+    def grasp_strategy(cls) -> GraspStrategy:
+        return GraspAcrossTheLength()
 
 
 @dataclass(eq=False)
@@ -1503,21 +1495,21 @@ class Spoon(Cutlery, IsPerceivable): ...
 
 
 @dataclass(eq=False)
-class Pencil(HasGraspCandidates):
+class Pencil(IsGraspable):
     """
     A pencil.
     """
 
 
 @dataclass(eq=False)
-class Pen(HasGraspCandidates):
+class Pen(IsGraspable):
     """
     A pen.
     """
 
 
 @dataclass(eq=False)
-class ShapeSortingPiece(HasGraspCandidates):
+class ShapeSortingPiece(IsGraspable):
     """
     A loose piece of a shape-sorting toy, which drops through the hole of its
     own outline.
@@ -1532,7 +1524,7 @@ class ShapeSortingPiece(HasGraspCandidates):
     point they are brought to.
     """
 
-    def default_grasp_candidates(self) -> List[GraspCandidate]:
+    def default_grasp_candidates(self) -> list[GraspCandidate]:
         """
         :return: The grasp from above, on the piece's vertical axis at
             :attr:`grasp_height`, closing along the piece's own x.
@@ -1566,7 +1558,7 @@ class ShapeSortingPiece(HasGraspCandidates):
 
 
 @dataclass(eq=False)
-class Baseball(HasGraspCandidates):
+class Baseball(IsGraspable):
     """
     A baseball.
     """
@@ -1615,7 +1607,7 @@ class Human(Agent):
 
 
 @dataclass(eq=False)
-class Parcel(HasGraspCandidates):
+class Parcel(IsGraspable):
     """
     A parcel, as handled in a warehouse.
     """
@@ -1628,8 +1620,11 @@ class SemanticEnvironmentAnnotation(HasRootBody):
     """
 
     def obstacle_entities(
-        self, search_space: BoundingBoxCollection[VolumetricBoundingBox, Point3]
-    ) -> List[Body]:
+        self,
+        *,
+        search_space: BoundingBoxCollection[VolumetricBoundingBox, Point3],
+        excluded_bodies: Iterable[Body] = (),
+    ) -> list[Body]:
         """
         Collect the obstacle bodies to consider within ``search_space``.
 
@@ -1638,22 +1633,23 @@ class SemanticEnvironmentAnnotation(HasRootBody):
 
         :param search_space: The search space; its reference frame is used to look up
             the owning world.
+        :param excluded_bodies: Bodies that are no obstacles either, such as an object
+            to be reached into.
         :return: The obstacle bodies to consider.
         """
         world = search_space.reference_frame._world
-        return [
-            body
-            for body in self.bodies_with_collision
-            if body not in world.robot_bodies_with_collision
-        ]
+        left_out = set(world.robot_bodies_with_collision) | set(excluded_bodies)
+        return [body for body in self.bodies_with_collision if body not in left_out]
 
     def build_bloated_obstacle_collection(
         self,
+        *,
         search_space: BoundingBoxCollection[VolumetricBoundingBox, Point3],
-        semantic_wall_annotation: Optional[Wall] = None,
+        semantic_wall_annotation: Wall | None = None,
         bloat_obstacles: float = 0.0,
         bloat_walls: float = 0.0,
         obstacle_height_clearance: float = 0.01,
+        excluded_bodies: Iterable[Body] = (),
     ) -> BoundingBoxCollection[VolumetricBoundingBox, Point3]:
         """
         Collect and bloat this annotation's obstacle bounding boxes.
@@ -1670,12 +1666,16 @@ class SemanticEnvironmentAnnotation(HasRootBody):
             dimension.
         :param obstacle_height_clearance: Amount to expand every obstacle bounding box
             in z, regardless of ``bloat_obstacles``/``bloat_walls``.
+        :param excluded_bodies: Bodies that are no obstacles, see
+            :meth:`obstacle_entities`.
         :return: A collection of the bloated obstacle and wall bounding boxes.
         """
         world_root = search_space.reference_frame
         origin = HomogeneousTransformationMatrix(reference_frame=world_root)
 
-        entities_to_consider = self.obstacle_entities(search_space)
+        entities_to_consider = self.obstacle_entities(
+            search_space=search_space, excluded_bodies=excluded_bodies
+        )
 
         collections = (
             entity.collision.as_bounding_box_collection_at_origin(origin)
@@ -1711,17 +1711,17 @@ class RoomWithWallsAndDoors(Room):
     A room with a type description (e.g., Ktichen) and walls and doors.
     """
 
-    room_type: Optional[str] = field(kw_only=True, default=None)
+    room_type: str | None = field(kw_only=True, default=None)
     """
     Description of the type of the room in natural language.
     """
 
-    walls: List[Wall] = field(kw_only=True, default_factory=list)
+    walls: list[Wall] = field(kw_only=True, default_factory=list)
     """
     The walls enclosing this room.
     """
 
-    doors: List[Door] = field(kw_only=True, default_factory=list)
+    doors: list[Door] = field(kw_only=True, default_factory=list)
     """
     The doors of the room.
     """
@@ -1733,7 +1733,7 @@ class DoorWithType(Door):
     A Door that has a type description, e.g. "main entrance".
     """
 
-    type_description: Optional[str] = field(kw_only=True, default=None)
+    type_description: str | None = field(kw_only=True, default=None)
 
 
 @dataclass(eq=False)
@@ -1751,7 +1751,7 @@ class Cooktop(HasRootBody):
 
 
 @dataclass(eq=False)
-class Tool(HasGraspCandidates, ABC):
+class Tool(IsGraspable, ABC):
     """
     A tool that is held by a robot's end effector to act on other bodies.
     """
@@ -1764,7 +1764,7 @@ class Tool(HasGraspCandidates, ABC):
         root_name = self.root.name
         return PrefixedName(f"{root_name.name}_end_effector", root_name.prefix)
 
-    def _find_end_effector_body(self) -> Optional[Body]:
+    def _find_end_effector_body(self) -> Body | None:
         if self.root._world is None:
             return None
 
@@ -1788,7 +1788,7 @@ class Tool(HasGraspCandidates, ABC):
         return end_effector
 
     @abstractmethod
-    def tool_alignment(self, target: Union[Body, Pose]) -> List[AlignmentPair]:
+    def tool_alignment(self, target: Body | Pose) -> list[AlignmentPair]:
         """
         :param target: The body or pose the tool acts on.
         :return: The normal pairs that must stay aligned while the tool acts on the
@@ -1838,11 +1838,11 @@ class Whisk(ToolWithHandle):
     A whisk for mixing the contents of containers.
     """
 
-    def tool_alignment(self, target: Union[Body, Pose]) -> List[AlignmentPair]:
+    def tool_alignment(self, target: Body | Pose) -> list[AlignmentPair]:
         return [
             AlignmentPair(
                 tip_normal=Vector3(-1, 0, 0, reference_frame=self.root),
-                goal_normal=Vector3(0, 0, 1, reference_frame=target),
+                reference_normal=Vector3(0, 0, 1, reference_frame=target),
             )
         ]
 
@@ -1853,15 +1853,15 @@ class CuttingKnife(ToolWithHandle):
     A knife for cutting food objects.
     """
 
-    def tool_alignment(self, target: Union[Body, Pose]) -> List[AlignmentPair]:
+    def tool_alignment(self, target: Body | Pose) -> list[AlignmentPair]:
         return [
             AlignmentPair(
                 tip_normal=Vector3(1, 0, 0, reference_frame=self.root),
-                goal_normal=Vector3(0, 1, 0, reference_frame=target),
+                reference_normal=Vector3(0, 1, 0, reference_frame=target),
             ),
             AlignmentPair(
                 tip_normal=Vector3(0, 0, 1, reference_frame=self.root),
-                goal_normal=Vector3(0, 0, 1, reference_frame=target),
+                reference_normal=Vector3(0, 0, 1, reference_frame=target),
             ),
         ]
 
@@ -1872,11 +1872,11 @@ class PouringCup(Tool, Container):
     A cup for pouring liquids into containers.
     """
 
-    def tool_alignment(self, target: Union[Body, Pose]) -> List[AlignmentPair]:
+    def tool_alignment(self, target: Body | Pose) -> list[AlignmentPair]:
         return [
             AlignmentPair(
                 tip_normal=Vector3(0, 0, 1, reference_frame=self.root),
-                goal_normal=Vector3(0, 0, 1, reference_frame=target),
+                reference_normal=Vector3(0, 0, 1, reference_frame=target),
             )
         ]
 
@@ -1890,18 +1890,18 @@ class Sponge(Tool):
         which is why its alignments use negative Z normals unlike the other tools.
     """
 
-    def tool_alignment(self, target: Union[Body, Pose]) -> List[AlignmentPair]:
+    def tool_alignment(self, target: Body | Pose) -> list[AlignmentPair]:
         if isinstance(target, Body):
             return [
                 AlignmentPair(
                     tip_normal=Vector3(0, 0, 1, reference_frame=self.root),
-                    goal_normal=Vector3(0, 0, -1, reference_frame=target),
+                    reference_normal=Vector3(0, 0, -1, reference_frame=target),
                 )
             ]
         return [
             AlignmentPair(
                 tip_normal=Vector3(0, 0, -1, reference_frame=self.root),
-                goal_normal=self._pose_surface_normal(target),
+                reference_normal=self._pose_surface_normal(target),
             )
         ]
 

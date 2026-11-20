@@ -9,15 +9,15 @@ from dataclasses import dataclass, field
 import numpy as np
 from typing_extensions import TYPE_CHECKING
 
-from semantic_digital_twin.exceptions import (
+from semantic_digital_twin.exceptions import ObjectHasNoWidthWithoutCollision
+from krrood_spatial_math.exceptions import (
     MissingReferenceFrameError,
-    ObjectHasNoWidthWithoutCollision,
     ReferenceFrameMismatchError,
 )
-from semantic_digital_twin.spatial_types.spatial_types import Pose
+from krrood_spatial_math.spatial_types import Pose
 
 if TYPE_CHECKING:
-    from semantic_digital_twin.semantic_annotations.mixins import HasGraspCandidates
+    from semantic_digital_twin.semantic_annotations.mixins import IsGraspable
 
 # %% grasp candidates
 
@@ -35,7 +35,7 @@ class GraspCandidate:
     how a grasp stays independent of the robot performing it.
     """
 
-    graspable: HasGraspCandidates
+    graspable: IsGraspable
     """
     The annotation of the object offering this grasp.
     """
@@ -57,7 +57,7 @@ class GraspCandidate:
             )
 
     @classmethod
-    def from_body_origin(cls, graspable: HasGraspCandidates) -> GraspCandidate:
+    def from_body_origin(cls, *, graspable: IsGraspable) -> GraspCandidate:
         """
         The grasp that takes an object at the origin of its own body.
 

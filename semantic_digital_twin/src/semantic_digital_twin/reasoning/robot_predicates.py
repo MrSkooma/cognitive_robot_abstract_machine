@@ -1,8 +1,8 @@
+# %% Imports
 from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import Optional, List
 
 import numpy as np
 import trimesh.sample
@@ -10,9 +10,7 @@ import trimesh.sample
 from krrood.entity_query_language.factories import (
     entity,
     variable,
-    contains,
     an,
-    the,
 )
 from krrood.entity_query_language.predicate import (
     RenderedFields,
@@ -29,7 +27,6 @@ from krrood.entity_query_language.verbalization.vocabulary.parts_of_speech impor
     Copula,
     Noun,
 )
-from semantic_digital_twin.datastructures.camera_resolution import CameraResolution
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.collision_checking.collision_detector import (
     ClosestPoints,
@@ -50,8 +47,7 @@ from semantic_digital_twin.robots.robot_parts import (
 from semantic_digital_twin.semantic_annotations.mixins import TKinematicStructureEntity
 from semantic_digital_twin.semantic_annotations.semantic_annotations import Floor
 from semantic_digital_twin.spatial_computations.raytracer import RayTracer
-from semantic_digital_twin.spatial_types import HomogeneousTransformationMatrix
-from semantic_digital_twin.spatial_types.spatial_types import Pose
+from krrood_spatial_math.spatial_types import Pose
 from semantic_digital_twin.world_description.connections import FixedConnection
 from semantic_digital_twin.world_description.geometry import VolumetricBoundingBox
 from semantic_digital_twin.world_description.world_entity import (
@@ -60,12 +56,13 @@ from semantic_digital_twin.world_description.world_entity import (
 )
 
 
+# %% Robot predicates
 @symbolic_function
 def robot_in_collision(
     robot: AbstractRobot,
-    ignore_collision_with: Optional[List[Body]] = None,
+    ignore_collision_with: list[Body] | None = None,
     threshold: float = 0.001,
-) -> List[ClosestPoints]:
+) -> list[ClosestPoints]:
     """
     Check if the robot collides with any object in the world at the given pose.
 
@@ -122,41 +119,7 @@ def robot_holds_body(robot: AbstractRobot, body: Body) -> bool:
 
 
 @symbolic_function
-def blocking(
-    pose: HomogeneousTransformationMatrix,
-    root: Body,
-    tip: Body,
-) -> List[ClosestPoints]:
-    """
-    Get the bodies that are blocking the robot from reaching a given position.
-
-    The blocking are all bodies that are in collision with the robot when reaching for
-    the pose.
-
-    :param pose: The pose to reach
-    :param root: The root of the kinematic chain.
-    :param tip: The threshold between the end effector and the position.
-    :return: A list of bodies the robot is in collision with when reaching for the
-        specified object or None if the pose or object is not reachable.
-    """
-    result = root._world.compute_inverse_kinematics(
-        root=root, tip=tip, target=pose, max_iterations=1000
-    )
-    with root._world.modify_world():
-        for dof, state in result.items():
-            root._world.state[dof.id].position = state
-
-    r = variable(AbstractRobot, root._world.semantic_annotations)
-    robot = the(
-        entity(r).where(
-            contains(r.bodies, tip),
-        )
-    )
-    return robot_in_collision(robot.first(), [])
-
-
-@symbolic_function
-def bodies_in_gripper(gripper: HasTwoFingers, sample_size: int = 100) -> List[Body]:
+def bodies_in_gripper(gripper: HasTwoFingers, sample_size: int = 100) -> list[Body]:
     """
     Gets all bodies which are between the finger of the gripper.
 
@@ -178,11 +141,12 @@ def bodies_in_gripper(gripper: HasTwoFingers, sample_size: int = 100) -> List[Bo
     finger_points = trimesh.sample.sample_surface(finger_mesh, sample_size)[0]
     thumb_points = trimesh.sample.sample_surface(thumb_mesh, sample_size)[0]
 
-    rt = gripper._world.ray_tracer
-    rt.update_scene()
-
-    points, index_ray, bodies = rt.ray_test(finger_points, thumb_points)
-    return list(set(bodies) - set(gripper.finger.bodies) - set(gripper.thumb.bodies))
+    ray_intersections = gripper._world.ray_tracer.ray_test(finger_points, thumb_points)
+    return list(
+        set(ray_intersections.bodies)
+        - set(gripper.finger.bodies)
+        - set(gripper.thumb.bodies)
+    )
 
 
 @symbolic_function
@@ -235,10 +199,10 @@ def is_gripper_holding_something(gripper: EndEffector) -> bool:
 @symbolic_function
 def is_pose_free_for_robot(robot: AbstractRobot, pose: Pose) -> bool:
     return not PlaceIsOccupied(
-        robot.mobile_base.bounding_box,
-        pose,
-        robot._world,
-        robot.bodies_with_collision
+        box=robot.mobile_base.bounding_box,
+        pose=pose,
+        world=robot._world,
+        allowed_bodies=robot.bodies_with_collision
         + [
             kse
             for annotation in robot._world.get_semantic_annotations_by_type(Floor)
@@ -248,7 +212,7 @@ def is_pose_free_for_robot(robot: AbstractRobot, pose: Pose) -> bool:
 
 
 @symbolic_function
-def get_visible_bodies(camera: Camera) -> List[KinematicStructureEntity]:
+def get_visible_bodies(camera: Camera) -> list[KinematicStructureEntity]:
     """
     Get all bodies and regions that are visible from the given camera using a
     segmentation mask.
@@ -260,8 +224,8 @@ def get_visible_bodies(camera: Camera) -> List[KinematicStructureEntity]:
     rt.update_scene()
 
     seg = rt.create_segmentation_mask(
-        camera.root_T_forward_view,
-        resolution=CameraResolution(width=256, height=256),
+        camera.world_T_forward_view,
+        resolution=camera.resolution,
         min_distance=0.2,
         field_of_view=camera.field_of_view,
     )
@@ -297,18 +261,20 @@ class VisibleTo(Triple[TKinematicStructureEntity, TCamera]):
         return self.camera
 
     @classmethod
-    def _verbalization_fragment_(cls, fields: RenderedFields) -> VerbalizationFragment:
+    def _verbalization_fragment_(
+        cls, *, fields: RenderedFields
+    ) -> VerbalizationFragment:
         """
         Reads as *"the entity is visible to the camera"*.
 
         :param fields: The rendered fragment for each field, keyed by field name.
         """
         return clause(
-            Noun(fields["entity"]),
+            Noun(content=fields["entity"]),
             Copula(),
-            Adjective("visible"),
+            Adjective(word="visible"),
             Prepositions.TO,
-            Noun(fields["camera"]),
+            Noun(content=fields["camera"]),
         )
 
     def __call__(self) -> bool:
@@ -316,7 +282,7 @@ class VisibleTo(Triple[TKinematicStructureEntity, TCamera]):
 
 
 @symbolic_function
-def occluding_bodies(camera: Camera, body: Body) -> List[Body]:
+def occluding_bodies(camera: Camera, body: Body) -> list[Body]:
     """
     Determines the bodies that occlude a given body in the scene as seen from a
     specified camera.
@@ -328,12 +294,12 @@ def occluding_bodies(camera: Camera, body: Body) -> List[Body]:
     :param body: The body for which the occluding bodies should be returned
     :return: A list of bodies that are occluding the given body.
     """
-    camera_pose = camera.root_T_forward_view
+    camera_pose = camera.world_T_forward_view
 
     # create a world only containing the target body
     world_without_occlusion = deepcopy(body._world)
     root = Body(name=PrefixedName("root"))
-    copied_body = Body.from_json(body.to_json())
+    copied_body = Body.from_json(data=body.to_json())
     root_T_body = body.global_transform
     root_T_body.reference_frame = root
     root_to_copied_body = FixedConnection(
@@ -352,7 +318,7 @@ def occluding_bodies(camera: Camera, body: Body) -> List[Body]:
     segmentation_mask_without_occlusion = (
         ray_tracer_without_occlusion.create_segmentation_mask(
             camera_pose,
-            resolution=CameraResolution(width=256, height=256),
+            resolution=camera.resolution,
             min_distance=0.1,
             field_of_view=camera.field_of_view,
         )
@@ -364,7 +330,7 @@ def occluding_bodies(camera: Camera, body: Body) -> List[Body]:
     segmentation_mask_with_occlusion = (
         ray_tracer_with_occlusion.create_segmentation_mask(
             camera_pose,
-            resolution=CameraResolution(width=256, height=256),
+            resolution=camera.resolution,
             min_distance=0.1,
             field_of_view=camera.field_of_view,
         )

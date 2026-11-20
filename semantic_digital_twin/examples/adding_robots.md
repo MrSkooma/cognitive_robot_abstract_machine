@@ -43,7 +43,7 @@ from semantic_digital_twin.adapters.urdf import URDFParser
 
 # Replace this with the path to your robot's URDF or MJCF file.
 parser = URDFParser.from_file("/path/to/your/robot.urdf")
-world = parser.parse()
+world = parser.create_world()
 world.visualize_world_structure()
 ```
 
@@ -69,7 +69,7 @@ on your robot.
 | :class:`~semantic_digital_twin.robots.robot_parts.Camera` | A sensor body | A single body + optical parameters                 |
 
 :class:`~semantic_digital_twin.robots.robot_parts.MobileBase`, :class:`~semantic_digital_twin.robots.robot_parts.EndEffector`, and :class:`~semantic_digital_twin.robots.robot_parts.Camera` only require a single root body.
-:class:`~semantic_digital_twin.robots.robot_parts.Torso`, :class:`~semantic_digital_twin.robots.robot_parts.Arm`, :class:`~semantic_digital_twin.robots.robot_parts.Neck`, and :class:`~semantic_digital_twin.robots.robot_parts.Finger` are :class:`~semantic_digital_twin.robots.robot_parts.KinematicChain` subclasses and need
+:class:`~semantic_digital_twin.robots.robot_parts.Torso`, :class:`~semantic_digital_twin.robots.robot_parts.Arm`, :class:`~semantic_digital_twin.robots.robot_parts.Neck`, and :class:`~semantic_digital_twin.robots.robot_parts.Finger` are :class:`~semantic_digital_twin.robots.robot_parts.RobotKinematicChain` subclasses and need
 both a **root** and a **tip** body — the framework computes all bodies and
 connections between them automatically.
 
@@ -174,7 +174,7 @@ from semantic_digital_twin.world_description.world_entity import KinematicStruct
 
 
 # %% Fingers 
-# A Finger is a KinematicChain: it needs a root body and a tip body.
+# A Finger is a RobotKinematicChain: it needs a root body and a tip body.
 # Replace the link names with the actual names from your URDF.
 
 @dataclass(eq=False)
@@ -224,11 +224,13 @@ class MyRobotRightFinger(Finger):
 
 ```
 
-A Camera only needs a root body plus optical parameters.
-forward_facing_axis: a property returning the axis of the camera frame that points forward into the scene.
-field_of_view: horizontal and vertical opening angles in radians.
-default_camera=True marks this as the camera returned by robot.get_default_camera().
-Exactly one camera across the entire robot must have default_camera=True.
+A robot camera needs an optical root body plus a camera model.
+The root uses positive x to the image right, positive y down, and positive z into the scene.
+Select the corresponding sensor's optical frame from the robot description. If none
+exists, `RobotCamera.create_optical_body(mounting_body, parent_T_optical)` adds an optical
+body with a fixed mounting pose to the world graph.
+`default_camera=True` marks this as the camera returned by `robot.get_default_camera()`.
+Exactly one camera across the entire robot must have `default_camera=True`.
 
 ```python
 from __future__ import annotations
@@ -236,14 +238,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Self, List
 
+from semantic_digital_twin.datastructures.camera_model import FieldOfViewCameraModel
 from semantic_digital_twin.datastructures.field_of_view import FieldOfView
 from semantic_digital_twin.datastructures.joint_state import JointState
-from semantic_digital_twin.robots.robot_parts import Camera
-from semantic_digital_twin.spatial_types import Vector3
+from semantic_digital_twin.robots.robot_parts import RobotCamera
 from semantic_digital_twin.world_description.world_entity import KinematicStructureEntity
 
 @dataclass(eq=False)
-class MyRobotCamera(Camera):
+class MyRobotCamera(RobotCamera):
 
     @classmethod
     def setup_default_configuration_in_world_below_robot_root(
@@ -253,15 +255,13 @@ class MyRobotCamera(Camera):
             root=robot_root._world.get_body_in_branch_by_name(
                 robot_root, "camera_optical_frame"
             ),
-            field_of_view=FieldOfView(horizontal_angle=1.047, vertical_angle=0.785),
+            camera_model=FieldOfViewCameraModel(
+                angular_extent=FieldOfView(horizontal_angle=1.047, vertical_angle=0.785)
+            ),
             minimal_height=0.8,
             maximal_height=1.5,
             default_camera=True,
         )
-
-    @property
-    def forward_facing_axis(self) -> Vector3:
-        return Vector3.Z(reference_frame=self.root)
 
     def setup_hardware_interfaces(self):
         return None
@@ -288,7 +288,7 @@ from semantic_digital_twin.datastructures.joint_state import JointState
 from semantic_digital_twin.datastructures.prefixed_name import PrefixedName
 from semantic_digital_twin.robots.robot_part_mixins import HasTwoFingers
 from semantic_digital_twin.robots.robot_parts import EndEffector
-from semantic_digital_twin.spatial_types import Vector3
+from krrood_spatial_math.spatial_types import Vector3
 from semantic_digital_twin.world_description.world_entity import KinematicStructureEntity
 
 
@@ -344,7 +344,7 @@ class MyRobotGripper(
 
 ### Arm and Neck
 
-Both are :class:`~semantic_digital_twin.robots.robot_parts.KinematicChain` subclasses: they need a root and a tip.
+Both are :class:`~semantic_digital_twin.robots.robot_parts.RobotKinematicChain` subclasses: they need a root and a tip.
 :class:`Arm[T] <semantic_digital_twin.robots.robot_parts.Arm>` already inherits :class:`HasEndEffector[T] <semantic_digital_twin.robots.robot_part_mixins.HasEndEffector>`, while :class:`Neck[T] <semantic_digital_twin.robots.robot_parts.Neck>`
 inherits from :class:`HasSensors[T] <semantic_digital_twin.robots.robot_part_mixins.HasSensors>`, so don't inherit from those mixins seperately here.
 
@@ -573,7 +573,7 @@ from semantic_digital_twin.adapters.urdf import URDFParser
 
 # Re-parse your URDF to get a fresh world, then annotate it with your robot class.
 parser = URDFParser.from_file("/path/to/your/robot.urdf")
-world = parser.parse()
+world = parser.create_world()
 
 robot = MyRobot.from_world(world)
 

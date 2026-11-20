@@ -1,143 +1,118 @@
+"""
+Tasks that point an axis of a link at a goal point.
+"""
+
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
-from giskardpy.motion_statechart.context import MotionStatechartContext
-from giskardpy.motion_statechart.graph_node import NodeArtifacts
+from giskardpy.motion_statechart.graph_node import MotionNodeArtifacts
+from giskardpy.motion_statechart.mixins import (
+    HasCruiseAngularVelocityParameter,
+    HasGoalPointParameter,
+    HasPointingAxisParameter,
+)
 from giskardpy.motion_statechart.tasks.cartesian_tasks import CartesianTask
-from semantic_digital_twin.spatial_types import Point3, Vector3
 from semantic_digital_twin.world_description.world_entity import (
     KinematicStructureEntity,
 )
 
+# %% pointing an axis at a point
 
-@dataclass(eq=False, repr=False)
-class Pointing(CartesianTask):
-    """
-    Will orient pointing_axis at goal_point.
-    """
 
-    goal_point: Point3 = field(kw_only=True)
+@dataclass(eq=False, repr=False, kw_only=True)
+class Pointing(
+    CartesianTask,
+    HasGoalPointParameter,
+    HasPointingAxisParameter,
+    HasCruiseAngularVelocityParameter,
+):
     """
-    Where to point pointing_axis at.
-    """
-
-    pointing_axis: Vector3 = field(kw_only=True)
-    """
-    The axis of tip_link that will be used for pointing.
-    """
-
-    max_velocity: float = field(default=0.3, kw_only=True)
-    """
-    Reference angular velocity for normalization in rad/s.
-    """
-
-    threshold: float = field(default=0.01, kw_only=True)
-    """
-    Observation is true if the pointing angle is below this threshold.
+    Will orient :attr:`pointing_axis` at :attr:`goal_point`, with an error in radians.
     """
 
     @property
     def goal_reference_frame(self) -> KinematicStructureEntity:
         return self.goal_point.reference_frame
 
-    def build_artifacts(self, context: MotionStatechartContext) -> NodeArtifacts:
+    def build_artifacts(self) -> MotionNodeArtifacts:
         """
-        Build motion constraints that swing the pointing axis onto the goal point.
+        Build motion constraints that swing the pointing axis onto :attr:`goal_point`.
 
-        :param context: Provides access to world model and kinematic expressions.
         :return: The artifacts of this task, whose error is the angle between the
             pointing axis and the goal direction.
         """
-        artifacts = NodeArtifacts()
-        goal_reference_frame_P_goal_point = self.goal_point
+        artifacts = MotionNodeArtifacts()
 
-        tip_V_pointing_axis = context.world.transform(
-            target_frame=self.tip_link, spatial_object=self.pointing_axis
+        tip_V_pointing_axis = self.context.world.transform(
+            target_frame=self.kinematic_chain.tip, spatial_object=self.pointing_axis
         )
         tip_V_pointing_axis.scale(1)
 
-        root_T_tip = context.world.compose_forward_kinematics_expression(
-            self.root_link, self.tip_link
+        root_T_tip = self.context.world.compose_forward_kinematics_expression(
+            self.kinematic_chain.root, self.kinematic_chain.tip
         )
 
-        root_P_goal_point = (
-            self.root_T_goal_reference_frame @ goal_reference_frame_P_goal_point
-        )
+        root_P_goal_point = self.root_T_goal_reference_frame @ self.goal_point
 
         root_V_goal_axis = root_P_goal_point - root_T_tip.position
         root_V_goal_axis.scale(1)
         root_V_pointing_axis = root_T_tip @ tip_V_pointing_axis
-        root_V_pointing_axis.visualisation_frame = self.tip_link
-        root_V_goal_axis.visualisation_frame = self.tip_link
+        root_V_pointing_axis.visualisation_frame = self.kinematic_chain.tip
+        root_V_goal_axis.visualisation_frame = self.kinematic_chain.tip
 
         tip_V_goal_axis = root_T_tip.inverse() @ root_V_goal_axis
         tip_V_goal_axis.scale(1)
         artifacts.geometry.add_vector_goal_constraints(
             frame_V_current=tip_V_goal_axis,
             frame_V_goal=tip_V_pointing_axis,
-            reference_velocity=self.max_velocity,
+            cruise_velocity=self.cruise_angular_velocity,
             quadratic_weight=self.weight,
         )
         self.add_goal_and_current_debug_expressions(
-            artifacts, goal=root_V_goal_axis, current=root_V_pointing_axis
+            artifacts=artifacts, goal=root_V_goal_axis, current=root_V_pointing_axis
         )
 
         artifacts.error = root_V_pointing_axis.angle_between(root_V_goal_axis)
         return artifacts
 
 
-@dataclass(eq=False, repr=False)
-class PointingCone(CartesianTask):
+@dataclass(eq=False, repr=False, kw_only=True)
+class PointingCone(
+    CartesianTask,
+    HasGoalPointParameter,
+    HasPointingAxisParameter,
+    HasCruiseAngularVelocityParameter,
+):
     """
-    Will orient pointing_axis at goal_point with a cone-shaped tolerance region.
-    """
-
-    goal_point: Point3 = field(kw_only=True)
-    """
-    Where to point pointing_axis at.
-    """
-
-    pointing_axis: Vector3 = field(kw_only=True)
-    """
-    The axis of tip_link that will be used for pointing.
+    Will orient :attr:`pointing_axis` at :attr:`goal_point` with a cone-shaped tolerance
+    region, with an error in radians.
     """
 
-    cone_theta: float = field(default=0.0, kw_only=True)
+    cone_theta: float = 0.0
     """
     Slack cone region in radians.
-    """
-
-    max_velocity: float = field(default=0.3, kw_only=True)
-    """
-    Reference angular velocity for normalization in rad/s.
-    """
-
-    threshold: float = field(default=0.01, kw_only=True)
-    """
-    Observation is true if the pointing angle is below this threshold.
     """
 
     @property
     def goal_reference_frame(self) -> KinematicStructureEntity:
         return self.goal_point.reference_frame
 
-    def build_artifacts(self, context: MotionStatechartContext) -> NodeArtifacts:
+    def build_artifacts(self) -> MotionNodeArtifacts:
         """
         Build motion constraints that swing the pointing axis into the goal cone.
 
-        :param context: Provides access to world model and kinematic expressions.
         :return: The artifacts of this task, whose error is the angle between the
             pointing axis and the nearest direction inside the cone.
         """
-        artifacts = NodeArtifacts()
-        tip_V_pointing_axis = context.world.transform(
-            target_frame=self.tip_link, spatial_object=self.pointing_axis
+        artifacts = MotionNodeArtifacts()
+        tip_V_pointing_axis = self.context.world.transform(
+            target_frame=self.kinematic_chain.tip, spatial_object=self.pointing_axis
         )
         tip_V_pointing_axis.scale(1)
 
-        root_T_tip = context.world.compose_forward_kinematics_expression(
-            self.root_link, self.tip_link
+        root_T_tip = self.context.world.compose_forward_kinematics_expression(
+            self.kinematic_chain.root, self.kinematic_chain.tip
         )
 
         root_P_goal_point = self.root_T_goal_reference_frame @ self.goal_point
@@ -145,23 +120,25 @@ class PointingCone(CartesianTask):
         root_V_goal_axis = root_P_goal_point - root_T_tip.position
         root_V_goal_axis.scale(1)
         root_V_pointing_axis = root_T_tip.dot(tip_V_pointing_axis)
-        root_V_pointing_axis.visualisation_frame = self.tip_link
+        root_V_pointing_axis.visualisation_frame = self.kinematic_chain.tip
 
-        root_V_goal_axis.visualisation_frame = self.tip_link
+        root_V_goal_axis.visualisation_frame = self.kinematic_chain.tip
 
         root_V_goal_axis_proj = root_V_pointing_axis.project_to_cone(
             root_V_goal_axis, self.cone_theta
         )
-        root_V_goal_axis_proj.visualisation_frame = self.tip_link
+        root_V_goal_axis_proj.visualisation_frame = self.kinematic_chain.tip
 
         artifacts.geometry.add_vector_goal_constraints(
             frame_V_current=root_V_pointing_axis,
             frame_V_goal=root_V_goal_axis_proj,
-            reference_velocity=self.max_velocity,
+            cruise_velocity=self.cruise_angular_velocity,
             quadratic_weight=self.weight,
         )
         self.add_goal_and_current_debug_expressions(
-            artifacts, goal=root_V_goal_axis_proj, current=root_V_pointing_axis
+            artifacts=artifacts,
+            goal=root_V_goal_axis_proj,
+            current=root_V_pointing_axis,
         )
 
         artifacts.error = root_V_pointing_axis.angle_between(root_V_goal_axis_proj)

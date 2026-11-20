@@ -23,7 +23,6 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List
 
 from experiments.control_loop_experiments.scenarios import (
     BENCHMARK_SCENARIOS,
@@ -48,7 +47,7 @@ from krrood.exceptions import DataclassException
 # %% one configuration of the sweep
 
 
-@dataclass
+@dataclass(kw_only=True)
 class ControlLoopBenchmarkResult(ExperimentResult):
     """
     What the repetitions of one scenario under one plotter mode measured.
@@ -61,7 +60,7 @@ class ControlLoopBenchmarkResult(ExperimentResult):
 
     plotter_mode: PlotterMode
     """
-    Whether the post goal plotters recorded the motion while it was measured.
+    Whether Giskard recorded the trajectory of the motion while it was measured.
     """
 
     control_cycles: MeanAndStandardDeviation
@@ -102,7 +101,7 @@ class ControlLoopBenchmarkResult(ExperimentResult):
 
     @classmethod
     def from_profiles(
-        cls, plotter_mode: PlotterMode, profiles: List[CallTreeProfile]
+        cls, *, plotter_mode: PlotterMode, profiles: list[CallTreeProfile]
     ) -> ControlLoopBenchmarkResult:
         """
         Aggregate the repetitions of one configuration into a single row.
@@ -140,7 +139,7 @@ class ControlLoopBenchmarkResult(ExperimentResult):
         )
 
 
-@dataclass
+@dataclass(kw_only=True)
 class NoProfilesMeasuredError(DataclassException):
     """
     Raised when a configuration is aggregated that was never measured.
@@ -215,7 +214,7 @@ class PhaseBreakdownResult(ExperimentResult):
     @classmethod
     def _rows_for(
         cls, profile: CallTreeProfile, path: PhasePath
-    ) -> List[PhaseBreakdownResult]:
+    ) -> list[PhaseBreakdownResult]:
         """
         The row of the phase at the given path, followed by everything it called.
         """
@@ -250,18 +249,18 @@ class PhaseBreakdownResult(ExperimentResult):
 # %% driving the measurements
 
 
-@dataclass
+@dataclass(kw_only=True)
 class BenchmarkMultiRun:
     """
     Runs every requested configuration in a subprocess and collects the results.
     """
 
-    scenario_names: List[str]
+    scenario_names: list[str]
     """
     The motions that are measured.
     """
 
-    plotter_modes: List[PlotterMode]
+    plotter_modes: list[PlotterMode]
     """
     The plotter modes every motion is measured under.
     """
@@ -276,7 +275,7 @@ class BenchmarkMultiRun:
     Frequency the controller is discretized for, in hertz.
     """
 
-    results: List[ControlLoopBenchmarkResult] = field(default_factory=list)
+    results: list[ControlLoopBenchmarkResult] = field(default_factory=list)
     """
     The configurations measured so far.
     """
@@ -288,15 +287,21 @@ class BenchmarkMultiRun:
         for scenario_name in self.scenario_names:
             for plotter_mode in self.plotter_modes:
                 profiles = [
-                    self._measure_in_subprocess(scenario_name, plotter_mode, repetition)
+                    self._measure_in_subprocess(
+                        scenario_name=scenario_name,
+                        plotter_mode=plotter_mode,
+                        repetition=repetition,
+                    )
                     for repetition in range(self.repeats)
                 ]
                 self.results.append(
-                    ControlLoopBenchmarkResult.from_profiles(plotter_mode, profiles)
+                    ControlLoopBenchmarkResult.from_profiles(
+                        plotter_mode=plotter_mode, profiles=profiles
+                    )
                 )
 
     def _measure_in_subprocess(
-        self, scenario_name: str, plotter_mode: PlotterMode, repetition: int
+        self, *, scenario_name: str, plotter_mode: PlotterMode, repetition: int
     ) -> CallTreeProfile:
         """
         Run one measurement in a process of its own and read its result.
@@ -326,7 +331,7 @@ class BenchmarkMultiRun:
                     scenario_name=scenario_name, return_code=completed.returncode
                 )
             return CallTreeProfile.from_json(
-                json.loads(Path(result_file.name).read_text())
+                data=json.loads(Path(result_file.name).read_text())
             )
 
     def render_figure(self) -> str:
@@ -383,7 +388,7 @@ def measure_one_scenario(arguments: argparse.Namespace) -> None:
         python_profiler=python_profiler,
     )
     with IsolatedBenchmarkSession():
-        profile = runner.run(scenario)
+        profile = runner.run(scenario=scenario)
         if python_profiler is not None:
             statistics = pstats.Stats(python_profiler)
             statistics.dump_stats(arguments.profile_to)
@@ -401,14 +406,9 @@ def run_sweep(arguments: argparse.Namespace) -> None:
     """
     Measure every requested configuration and print the comparison.
     """
-    plotter_modes = {
-        "debug": [PlotterMode.DEBUG],
-        "plain": [PlotterMode.PLAIN],
-        "both": [PlotterMode.PLAIN, PlotterMode.DEBUG],
-    }[arguments.plotters]
     sweep = BenchmarkMultiRun(
         scenario_names=arguments.scenarios,
-        plotter_modes=plotter_modes,
+        plotter_modes=[PlotterMode(value) for value in arguments.plotter_modes],
         repeats=arguments.repeats,
         target_frequency=arguments.target_frequency,
     )
@@ -436,15 +436,16 @@ def parse_arguments() -> argparse.Namespace:
         help="how often to measure every configuration",
     )
     parser.add_argument(
-        "--plotters",
-        default="both",
-        choices=["debug", "plain", "both"],
-        help="whether the post goal plotters record while measuring",
+        "--plotter-modes",
+        nargs="+",
+        default=[mode.value for mode in PlotterMode],
+        choices=[mode.value for mode in PlotterMode],
+        help="the plotter modes every scenario is measured under",
     )
     parser.add_argument(
         "--target-frequency",
         type=float,
-        default=20.0,
+        default=ScenarioRunner.target_frequency,
         help="frequency the controller is discretized for, in hertz",
     )
     parser.add_argument(
@@ -460,7 +461,7 @@ def parse_arguments() -> argparse.Namespace:
         "--plotter-mode",
         default=PlotterMode.PLAIN.value,
         choices=[mode.value for mode in PlotterMode],
-        help="whether the post goal plotters record, only together with --scenario",
+        help="whether Giskard records the trajectory, only together with --scenario",
     )
     parser.add_argument(
         "--profile-to",

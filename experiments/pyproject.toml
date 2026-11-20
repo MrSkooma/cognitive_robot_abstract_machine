@@ -10,13 +10,18 @@ license = "LGPL-3.0-only"
 dynamic = ["version"]
 dependencies = [
     "line_profiler",
-    "coraplex",
-    "giskardpy",
-    "krrood",
-    "probabilistic_model",
+    "coraplex>=26.10.0",
+    "cramph>=26.10.0",
+    "giskardpy>=26.10.0",
+    "h5py",
+    "krrood>=26.10.0",
+    "krrood_compute_resources[jax,torch]>=26.10.0",
+    "probabilistic_model[jax,torch]>=26.10.0",
+    "psutil~=5.9.0",
     "pymysql",
-    "random_events",
-    "semantic_digital_twin",
+    "random_events>=26.10.0",
+    "semantic_digital_twin>=26.10.0",
+    "krrood_spatial_math[casadi]>=26.10.0",
 ]
 
 [tool.setuptools]
@@ -29,8 +34,11 @@ version = {attr = "experiments._version.__version__"}
 [dependency-groups]
 workspace = [
     "coraplex",
+    "cramph",
     "giskardpy",
     "krrood",
+    "krrood_compute_resources",
+    "krrood_spatial_math",
     "random_events",
     "semantic_digital_twin",
 ]

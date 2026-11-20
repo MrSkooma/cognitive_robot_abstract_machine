@@ -1,8 +1,13 @@
+"""
+Tests of the monitors that observe a geometric relation between a feature on the gripper
+and one on the robot's base, each run while a task establishes it.
+"""
+
+from __future__ import annotations
+
 from math import radians
 
-from giskardpy.executor import Executor
-from giskardpy.motion_statechart.context import MotionStatechartContext
-from giskardpy.motion_statechart.data_types import ObservationStateValues
+from cramph.data_types import ObservationStateValue
 from giskardpy.motion_statechart.graph_node import EndMotion
 from giskardpy.motion_statechart.monitors.feature_monitors import (
     HeightMonitor,
@@ -10,24 +15,43 @@ from giskardpy.motion_statechart.monitors.feature_monitors import (
     DistanceMonitor,
     AngleMonitor,
 )
-from giskardpy.motion_statechart.motion_statechart import MotionStatechart
+from cramph.statechart import Statechart
 from giskardpy.motion_statechart.tasks.feature_functions import (
     HeightGoal,
     DistanceGoal,
     AngleGoal,
     AlignPerpendicular,
 )
-from semantic_digital_twin.spatial_types import Point3, Vector3
+from krrood_spatial_math.spatial_types import Point3, Vector3
 from semantic_digital_twin.world import World
+from giskardpy.motion_control import MotionControl
+from cramph.context import StatechartContext
+from cramph.executor import StatechartExecutor
+from semantic_digital_twin.world_description.kinematic_chain import KinematicChain
 
 
-def _run(msc: MotionStatechart, world: World) -> None:
-    kin_sim = Executor(MotionStatechartContext(world=world))
-    kin_sim.compile(motion_statechart=msc)
-    kin_sim.tick_until_end()
+def _create_executor(world: World) -> StatechartExecutor:
+    """
+    :return: An executor with motion control acting in `world`.
+    """
+    return StatechartExecutor(
+        context=StatechartContext(world=world), extensions=[MotionControl()]
+    )
+
+
+def _run(executor: StatechartExecutor, statechart: Statechart) -> None:
+    """
+    Compiles `statechart` with `executor` and ticks it until it ends.
+    """
+    executor.compile(statechart=statechart)
+    executor.tick_until_end()
 
 
 def test_height_monitor(pr2_world_state_reset: World):
+    """
+    A height monitor observes true once the gripper's point is between its limits above
+    the reference point.
+    """
     tip = pr2_world_state_reset.get_kinematic_structure_entity_by_name(
         "r_gripper_tool_frame"
     )
@@ -38,32 +62,35 @@ def test_height_monitor(pr2_world_state_reset: World):
     reference_point = Point3(0, 0, 0, reference_frame=root)
     lower_limit, upper_limit = 0.3, 0.5
 
-    msc = MotionStatechart()
+    executor = _create_executor(pr2_world_state_reset)
+    statechart = Statechart(context=executor.context)
     drive = HeightGoal(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_point=tip_point,
         reference_point=reference_point,
         lower_limit=lower_limit,
         upper_limit=upper_limit,
     )
     monitor = HeightMonitor(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_point=tip_point,
         reference_point=reference_point,
         lower_limit=lower_limit,
         upper_limit=upper_limit,
     )
-    msc.add_nodes([drive, monitor])
-    msc.add_node(EndMotion.when_true(monitor))
+    statechart.add_nodes(nodes=[drive, monitor])
+    statechart.add_node(node=EndMotion.when_true(node=monitor))
 
-    _run(msc, pr2_world_state_reset)
+    _run(executor, statechart)
 
-    assert monitor.observation_state == ObservationStateValues.TRUE
+    assert monitor.observation_state == ObservationStateValue.TRUE
 
 
 def test_distance_monitor(pr2_world_state_reset: World):
+    """
+    A distance monitor observes true once the gripper's point is between its limits away
+    from the reference point.
+    """
     tip = pr2_world_state_reset.get_kinematic_structure_entity_by_name(
         "r_gripper_tool_frame"
     )
@@ -74,32 +101,35 @@ def test_distance_monitor(pr2_world_state_reset: World):
     reference_point = Point3(0, 0, 0, reference_frame=root)
     lower_limit, upper_limit = 0.4, 0.6
 
-    msc = MotionStatechart()
+    executor = _create_executor(pr2_world_state_reset)
+    statechart = Statechart(context=executor.context)
     drive = DistanceGoal(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_point=tip_point,
         reference_point=reference_point,
         lower_limit=lower_limit,
         upper_limit=upper_limit,
     )
     monitor = DistanceMonitor(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_point=tip_point,
         reference_point=reference_point,
         lower_limit=lower_limit,
         upper_limit=upper_limit,
     )
-    msc.add_nodes([drive, monitor])
-    msc.add_node(EndMotion.when_true(monitor))
+    statechart.add_nodes(nodes=[drive, monitor])
+    statechart.add_node(node=EndMotion.when_true(node=monitor))
 
-    _run(msc, pr2_world_state_reset)
+    _run(executor, statechart)
 
-    assert monitor.observation_state == ObservationStateValues.TRUE
+    assert monitor.observation_state == ObservationStateValue.TRUE
 
 
 def test_angle_monitor(pr2_world_state_reset: World):
+    """
+    An angle monitor observes true once the angle between the gripper's vector and the
+    reference vector is between its limits.
+    """
     tip = pr2_world_state_reset.get_kinematic_structure_entity_by_name(
         "r_gripper_tool_frame"
     )
@@ -108,32 +138,35 @@ def test_angle_monitor(pr2_world_state_reset: World):
     reference_vector = Vector3.X(reference_frame=root)
     lower_angle, upper_angle = radians(30), radians(32)
 
-    msc = MotionStatechart()
+    executor = _create_executor(pr2_world_state_reset)
+    statechart = Statechart(context=executor.context)
     drive = AngleGoal(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_vector=tip_vector,
         reference_vector=reference_vector,
         lower_angle=lower_angle,
         upper_angle=upper_angle,
     )
     monitor = AngleMonitor(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_vector=tip_vector,
         reference_vector=reference_vector,
         lower_angle=lower_angle,
         upper_angle=upper_angle,
     )
-    msc.add_nodes([drive, monitor])
-    msc.add_node(EndMotion.when_true(monitor))
+    statechart.add_nodes(nodes=[drive, monitor])
+    statechart.add_node(node=EndMotion.when_true(node=monitor))
 
-    _run(msc, pr2_world_state_reset)
+    _run(executor, statechart)
 
-    assert monitor.observation_state == ObservationStateValues.TRUE
+    assert monitor.observation_state == ObservationStateValue.TRUE
 
 
 def test_perpendicular_monitor(pr2_world_state_reset: World):
+    """
+    A perpendicular monitor observes true once the gripper's normal stands at a right
+    angle to the reference normal.
+    """
     tip = pr2_world_state_reset.get_kinematic_structure_entity_by_name(
         "r_gripper_tool_frame"
     )
@@ -141,22 +174,21 @@ def test_perpendicular_monitor(pr2_world_state_reset: World):
     tip_normal = Vector3.X(reference_frame=tip)
     reference_normal = Vector3.X(reference_frame=root)
 
-    msc = MotionStatechart()
+    executor = _create_executor(pr2_world_state_reset)
+    statechart = Statechart(context=executor.context)
     drive = AlignPerpendicular(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_normal=tip_normal,
         reference_normal=reference_normal,
     )
     monitor = PerpendicularMonitor(
-        root_link=root,
-        tip_link=tip,
+        kinematic_chain=KinematicChain(root=root, tip=tip),
         tip_normal=tip_normal,
         reference_normal=reference_normal,
     )
-    msc.add_nodes([drive, monitor])
-    msc.add_node(EndMotion.when_true(monitor))
+    statechart.add_nodes(nodes=[drive, monitor])
+    statechart.add_node(node=EndMotion.when_true(node=monitor))
 
-    _run(msc, pr2_world_state_reset)
+    _run(executor, statechart)
 
-    assert monitor.observation_state == ObservationStateValues.TRUE
+    assert monitor.observation_state == ObservationStateValue.TRUE
