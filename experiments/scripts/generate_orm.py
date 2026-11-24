@@ -4,10 +4,11 @@ from pathlib import Path
 import experiments
 import experiments.control_loop_experiments.benchmark
 import experiments.control_loop_experiments.scenarios
+import experiments.tiago_robocasa
 import coraplex.orm.ormatic_interface
 
 from krrood.ormatic.ormatic import ORMatic
-from krrood.ormatic.utils import classes_of_module
+from krrood.ormatic.utils import classes_of_module, classes_of_package
 import experiments.control_loop_experiments.control_loop_profiler
 
 # benchmarking measures a running system instead of describing it
@@ -18,6 +19,8 @@ ignored_classes |= set(
 ignored_classes |= set(
     classes_of_module(experiments.control_loop_experiments.control_loop_profiler)
 )
+# Tiago's RoboCasa tasks share their class names with the HSR's, so both cannot be tables
+ignored_classes |= set(classes_of_package(experiments.tiago_robocasa))
 
 # Create an ORMatic object with the classes to be mapped
 ormatic = ORMatic.from_package(
