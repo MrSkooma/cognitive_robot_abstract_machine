@@ -40,6 +40,36 @@ class NoStoredPartsError(DataclassException):
         )
 
 
+@dataclass(kw_only=True)
+class NoRecordedPartsError(DataclassException):
+    """
+    Raised when the parts of a mesh are asked for that the part finding server was never
+    asked about while its answers were recorded.
+    """
+
+    whole_type: Type[PartWholeRelationship]
+    """
+    The type of the annotation whose parts were asked for.
+    """
+
+    directory: Path
+    """
+    Where the recorded answers are.
+    """
+
+    def error_message(self) -> str:
+        return (
+            f"No answer recorded in {self.directory} belongs to the query about the "
+            f"{self.whole_type.__name__}."
+        )
+
+    def suggest_correction(self) -> str:
+        return (
+            "Record the answers again with the part finding server, for instance after "
+            "the mesh of the object changed."
+        )
+
+
 # %% grasping
 
 

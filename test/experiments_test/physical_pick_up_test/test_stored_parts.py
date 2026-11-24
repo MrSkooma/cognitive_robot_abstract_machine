@@ -7,9 +7,20 @@ import numpy as np
 import pytest
 import trimesh
 
-from experiments.physical_pick_up.exceptions import NoStoredPartsError
-from experiments.physical_pick_up.stored_parts import StoredPartLocator
-from semantic_digital_twin.part_finding.locating import PartQuery
+from krrood.adapters.json_serializer import to_json
+
+from experiments.physical_pick_up.exceptions import (
+    NoRecordedPartsError,
+    NoStoredPartsError,
+)
+from experiments.physical_pick_up.stored_parts import (
+    AnswerStoringLocator,
+    RecordedAnswerLocator,
+    StoredPart,
+    StoredPartLocator,
+)
+from semantic_digital_twin.adapters.part_finding.server import PartFindingCache
+from semantic_digital_twin.part_finding.locating import LocatedPart, PartQuery
 from semantic_digital_twin.semantic_annotations.semantic_annotations import Mug
 
 # %% fixtures
@@ -33,7 +44,11 @@ def directory(tmp_path: Path, mesh: trimesh.Trimesh) -> Path:
             {
                 "object": "mug_0",
                 "parts": [
-                    {"relationship": "handle", "faces": [0, 1, 2, 3], "confidence": 0.9}
+                    to_json(
+                        StoredPart(
+                            relationship="handle", faces=[0, 1, 2, 3], confidence=0.9
+                        )
+                    )
                 ],
             }
         )
@@ -112,3 +127,54 @@ def test_a_mesh_without_a_stored_answer_has_no_parts_unless_an_answer_is_require
     other_mesh = trimesh.creation.box(extents=(0.2, 0.1, 0.1))
 
     assert locator.locate(PartQuery.from_mesh(other_mesh, Mug, ["handle"])) == []
+
+
+# %% storing answers
+
+
+def test_a_stored_answer_is_answered_again_without_the_locator_that_found_it(
+    directory, mesh, tmp_path
+):
+    query = PartQuery.from_mesh(mesh, Mug, ["handle"])
+    storing_locator = AnswerStoringLocator(
+        answering_locator=StoredPartLocator(directory=directory),
+        directory=tmp_path / "stored",
+        object_name="mug",
+    )
+    [found] = storing_locator.locate(query)
+
+    [answered] = StoredPartLocator(directory=tmp_path / "stored").locate(query)
+
+    assert answered.relationship_name == found.relationship_name
+    np.testing.assert_array_equal(answered.faces, found.faces)
+    assert answered.confidence == found.confidence
+
+
+def test_a_recorded_query_is_answered_with_its_recorded_parts(mesh, tmp_path):
+    query = PartQuery.from_mesh(mesh, Mug, ["handle"])
+    recorded_answers = PartFindingCache(directory=tmp_path)
+    recorded_answers.write(
+        recorded_answers.key(query, locator=""),
+        [
+            LocatedPart(
+                relationship_name="handle",
+                faces=np.array([4, 5], dtype=np.int64),
+                confidence=0.8,
+            )
+        ],
+    )
+
+    [part] = RecordedAnswerLocator(recorded_answers=recorded_answers).locate(query)
+
+    assert part.relationship_name == "handle"
+    np.testing.assert_array_equal(part.faces, [4, 5])
+    assert part.confidence == 0.8
+
+
+def test_a_query_never_recorded_cannot_be_answered(mesh, tmp_path):
+    locator = RecordedAnswerLocator(
+        recorded_answers=PartFindingCache(directory=tmp_path)
+    )
+
+    with pytest.raises(NoRecordedPartsError):
+        locator.locate(PartQuery.from_mesh(mesh, Mug, ["handle"]))
