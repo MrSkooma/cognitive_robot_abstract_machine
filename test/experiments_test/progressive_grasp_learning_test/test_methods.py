@@ -26,6 +26,7 @@ from experiments.progressive_grasp_learning.task_attempts import (
     GraspNumber,
     ScaledAttempts,
 )
+from probabilistic_model.distributions.distributions import SymbolicDistribution
 from probabilistic_model.distributions.gaussian import GaussianDistribution
 from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import LeafUnit
 
@@ -195,3 +196,23 @@ def test_tuned_scratch_learns_the_candidate_with_the_lowest_cross_validated_loss
         model.outcome_likelihoods(probe_grasps).log_joint,
         best.outcome_likelihoods(probe_grasps).log_joint,
     )
+
+
+def test_the_outcome_pseudo_count_keeps_failure_possible_after_only_lifts(
+    settings, variables, new_attempts
+):
+    settings.outcome_pseudo_count = 1.0
+    only_lifts = new_attempts.rows(np.arange(len(new_attempts.lifted)))
+    only_lifts.lifted = np.ones(len(only_lifts.lifted), dtype=bool)
+
+    model = FixedScratch(settings=settings, variables=variables).learned_column(
+        training=only_lifts, seed=SEED
+    )
+
+    failure_probabilities = [
+        unit.distribution.probabilities[hash(LiftOutcome.NOT_LIFTED)]
+        for unit in model.progressive_circuit.units_of(model.column)
+        if isinstance(unit, LeafUnit)
+        and isinstance(unit.distribution, SymbolicDistribution)
+    ]
+    assert min(failure_probabilities) > 0

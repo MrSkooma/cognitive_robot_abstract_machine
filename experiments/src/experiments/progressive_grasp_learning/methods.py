@@ -149,6 +149,11 @@ class LearningSettings:
     The lowest variance a learned Gaussian leaf may have.
     """
 
+    outcome_pseudo_count: float = 1.0
+    """
+    Added to the weighted count of each outcome in every learned outcome leaf.
+    """
+
     def progressive_circuit(
         self, *, variables: GraspOutcomeVariables, seed: int
     ) -> ProgressiveProbabilisticCircuit:
@@ -182,7 +187,8 @@ class LearningSettings:
         ProgressiveExpectationMaximization(
             progressive_circuit,
             expectation_maximization=ExpectationMaximization(
-                minimum_gaussian_variance=self.minimum_gaussian_variance
+                minimum_gaussian_variance=self.minimum_gaussian_variance,
+                discrete_pseudo_count=self.outcome_pseudo_count,
             ),
         ).learn(
             variables.rows(

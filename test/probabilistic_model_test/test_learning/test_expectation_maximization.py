@@ -10,9 +10,13 @@ import pandas as pd
 import pytest
 import sklearn.datasets
 from random_events.interval import closed
-from random_events.variable import Continuous
+from enum import IntEnum
+
+from random_events.set import Set
+from random_events.variable import Continuous, Symbolic
 from sklearn.mixture import GaussianMixture
 
+from probabilistic_model.distributions.distributions import SymbolicDistribution
 from probabilistic_model.distributions.gaussian import (
     GaussianDistribution,
     TruncatedGaussianDistribution,
@@ -37,6 +41,7 @@ from probabilistic_model.probabilistic_circuit.rx.probabilistic_circuit import (
     SumUnit,
     leaf,
 )
+from probabilistic_model.utils import MissingDict
 
 
 # %% fixtures
@@ -283,3 +288,57 @@ def test_fit_matches_diagonal_gaussian_mixture_of_scikit_learn(
     assert circuit.log_likelihood(data.to_numpy()).mean() == pytest.approx(
         scikit_learn_mixture.score(iris.to_numpy())
     )
+
+
+# %% discrete leaves
+class Outcome(IntEnum):
+    """
+    Symbols of a symbolic test variable.
+    """
+
+    FAILURE = 0
+    SUCCESS = 1
+
+
+def _make_symbolic_leaf_circuit() -> ProbabilisticCircuit:
+    """
+    A circuit of one symbolic leaf giving both outcomes the same probability.
+    """
+    circuit = ProbabilisticCircuit()
+    leaf(
+        SymbolicDistribution(
+            variable=Symbolic(name="outcome", domain=Set.from_iterable(Outcome)),
+            probabilities=MissingDict(
+                float, {hash(Outcome.FAILURE): 0.5, hash(Outcome.SUCCESS): 0.5}
+            ),
+        ),
+        circuit,
+    )
+    return circuit
+
+
+def test_a_discrete_leaf_learns_the_share_of_each_value():
+    circuit = _make_symbolic_leaf_circuit()
+    data = np.array([[Outcome.SUCCESS]] * 3)
+
+    _learn_all_units(circuit, data)
+
+    [symbolic_leaf] = circuit.leaves
+    assert symbolic_leaf.distribution.probabilities[
+        hash(Outcome.FAILURE)
+    ] == pytest.approx(0.0)
+
+
+def test_a_pseudo_count_is_added_to_every_value_of_a_discrete_leaf():
+    circuit = _make_symbolic_leaf_circuit()
+    data = np.array([[Outcome.SUCCESS]] * 3)
+    pseudo_count = 1.0
+
+    ExpectationMaximization(discrete_pseudo_count=pseudo_count).learn(
+        circuit, data, LearnableUnits.from_units(circuit.nodes()), 1
+    )
+
+    [symbolic_leaf] = circuit.leaves
+    assert symbolic_leaf.distribution.probabilities[
+        hash(Outcome.FAILURE)
+    ] == pytest.approx(pseudo_count / (len(data) + pseudo_count * len(Outcome)))

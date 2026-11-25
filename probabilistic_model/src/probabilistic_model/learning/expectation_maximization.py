@@ -142,6 +142,12 @@ class ExpectationMaximization:
     Lower bound for the variance of a learned Gaussian leaf.
     """
 
+    discrete_pseudo_count: float = 0.0
+    """
+    Added to the weighted count of every value of a learned discrete leaf, so that with
+    a positive count no value's probability reaches zero.
+    """
+
     def learn(
         self,
         circuit: ProbabilisticCircuit,
@@ -375,15 +381,16 @@ class ExpectationMaximization:
             np.sqrt(max(variance, self.minimum_gaussian_variance))
         )
 
-    @staticmethod
     def _fit_discrete(
+        self,
         distribution: DiscreteDistribution,
         values: SampleColumn,
         weights: SampleValues,
     ) -> None:
         """
-        Set every probability of a discrete distribution to the weighted share of the
-        rows with that value.
+        Set every probability of a discrete distribution to the share of each value in
+        the weighted rows, with :attr:`discrete_pseudo_count` added to the count of
+        every value.
 
         :param distribution: The distribution to update in place.
         :param values: The value of its variable in every row.
@@ -392,7 +399,9 @@ class ExpectationMaximization:
         value_hashes = np.array([hash(value) for value in values])
         probabilities = distribution.probabilities
         for key in list(probabilities.keys()):
-            probabilities[key] = float(np.sum(weights[value_hashes == key]))
+            probabilities[key] = (
+                float(np.sum(weights[value_hashes == key])) + self.discrete_pseudo_count
+            )
         distribution.normalize()
 
 
