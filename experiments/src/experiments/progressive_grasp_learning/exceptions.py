@@ -31,3 +31,38 @@ class ZeroGraspDensityError(DataclassException):
             "Use a model whose leaves have support on the whole unit interval, such as "
             "Gaussian leaves."
         )
+
+
+# %% grids
+
+
+@dataclass(kw_only=True)
+class TooFewTrainingAttemptsError(DataclassException):
+    """
+    Raised when a grid asks to learn from more attempts than a task's training pool
+    holds.
+    """
+
+    task_number: int
+    """
+    The number of the task.
+    """
+
+    number_of_training_attempts: int
+    """
+    The number of attempts asked for.
+    """
+
+    pool_size: int
+    """
+    The number of attempts in the task's training pool.
+    """
+
+    def error_message(self) -> str:
+        return (
+            f"Task {self.task_number} has {self.pool_size} attempts in its training "
+            f"pool, fewer than the {self.number_of_training_attempts} asked for."
+        )
+
+    def suggest_correction(self) -> str:
+        return "Collect more runs of the task or ask for fewer training attempts."

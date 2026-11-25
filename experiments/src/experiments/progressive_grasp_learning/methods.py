@@ -304,6 +304,13 @@ class TransferMethod(ABC):
     before it.
     """
 
+    @property
+    @abstractmethod
+    def reads_earlier_task(self) -> bool:
+        """
+        Whether the model depends on the earlier task.
+        """
+
     @abstractmethod
     def model(
         self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
@@ -332,6 +339,10 @@ class ProgressiveColumn(TransferMethod):
     """
     The variables of the circuit.
     """
+
+    @property
+    def reads_earlier_task(self) -> bool:
+        return True
 
     def model(
         self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
@@ -366,6 +377,10 @@ class FixedScratch(TransferMethod):
     """
     The variables of the circuit.
     """
+
+    @property
+    def reads_earlier_task(self) -> bool:
+        return False
 
     def model(
         self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
@@ -424,6 +439,10 @@ class TunedScratch(TransferMethod):
         """
         return 10
 
+    @property
+    def reads_earlier_task(self) -> bool:
+        return False
+
     def model(
         self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
     ) -> OutcomeModel:
@@ -471,6 +490,10 @@ class EarlierColumnUnchanged(TransferMethod):
     """
     The variables of the circuit.
     """
+
+    @property
+    def reads_earlier_task(self) -> bool:
+        return True
 
     def model(
         self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
