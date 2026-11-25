@@ -15,6 +15,7 @@ from .test_grasp_learning import (
     task_of,
 )
 
+from experiments.grasp_learning import collection
 from experiments.grasp_learning.collection import CollectionRun, NumberedRun
 from experiments.grasp_learning.collection_files import (
     CollectionDirectory,
@@ -132,6 +133,10 @@ def test_the_manifest_reads_back_as_written(run, run_database):
         CollectionManifest.read(path=run.path(CollectionFileSuffix.MANIFEST))
         == manifest
     )
+
+
+def test_the_manifest_type_lives_outside_the_module_run_as_a_command():
+    assert CollectionManifest.__module__ != collection.__name__
 
 
 def test_the_files_of_the_stored_parts_directory_are_listed(run, tmp_path):

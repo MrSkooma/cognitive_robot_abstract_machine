@@ -1,14 +1,10 @@
 """
 Learning every new task of a grid from a few of its attempts, by every compared method,
 after each task it is paired with, and scoring each model on the new task's probe set.
-
-Run it with ``python -m experiments.progressive_grasp_learning.transfer_grid``; see
-``--help``.
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import multiprocessing
 import time
@@ -45,7 +41,7 @@ from experiments.progressive_grasp_learning.task_attempts import (
     ScaledAttempts,
     TaskAttempts,
 )
-from krrood.adapters.json_serializer import from_json, to_json
+from krrood.adapters.json_serializer import to_json
 
 # %% compared methods
 
@@ -645,46 +641,3 @@ class TransferGrid:
                     number_of_fits += 1
                 fits.flush()
         return number_of_fits
-
-
-# %% the command line
-
-
-def main() -> None:
-    """
-    Run the grid a definition file describes.
-    """
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--definition",
-        type=Path,
-        required=True,
-        help="a JSON file holding the grid's definition",
-    )
-    parser.add_argument(
-        "--collection-directory",
-        type=Path,
-        required=True,
-        help="where the tasks' collection runs wrote their files",
-    )
-    parser.add_argument(
-        "--output-directory",
-        type=Path,
-        required=True,
-        help="a new directory the grid's files go to",
-    )
-    parser.add_argument("--workers", type=int, default=1)
-    arguments = parser.parse_args()
-    grid = TransferGrid(
-        definition=from_json(json.loads(arguments.definition.read_text())),
-        directory=CollectionDirectory(path=arguments.collection_directory),
-    )
-    number_of_fits = grid.run(
-        output_directory=arguments.output_directory,
-        number_of_workers=arguments.workers,
-    )
-    print(f"{number_of_fits} fits written to {arguments.output_directory}")
-
-
-if __name__ == "__main__":
-    main()

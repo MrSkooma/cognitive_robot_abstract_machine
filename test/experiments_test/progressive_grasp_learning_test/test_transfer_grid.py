@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import math
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -25,6 +27,7 @@ from experiments.progressive_grasp_learning.methods import (
     LearningSettings,
     RatSpnTemplate,
 )
+from experiments.progressive_grasp_learning import run_grid
 from experiments.progressive_grasp_learning.synthetic_tasks import BoxTask
 from experiments.progressive_grasp_learning.task_attempts import GraspNumber
 from experiments.progressive_grasp_learning.transfer_grid import (
@@ -37,7 +40,7 @@ from experiments.progressive_grasp_learning.transfer_grid import (
     TaskPair,
     TransferGrid,
 )
-from krrood.adapters.json_serializer import from_json
+from krrood.adapters.json_serializer import from_json, to_json
 
 # %% fixtures
 
@@ -225,3 +228,36 @@ def test_asking_for_more_attempts_than_the_pool_holds_is_refused(definition, dir
 
     with pytest.raises(TooFewTrainingAttemptsError):
         grid.units(grid.scaled_tasks())[0].run()
+
+
+# %% the command line
+
+
+def test_the_fits_the_command_writes_read_back_as_results(
+    definition, directory, tmp_path
+):
+    definition_path = tmp_path / "definition.json"
+    definition_path.write_text(json.dumps(to_json(definition)))
+    output_directory = tmp_path / "grid"
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            run_grid.__name__,
+            "--definition",
+            str(definition_path),
+            "--collection-directory",
+            str(directory.path),
+            "--output-directory",
+            str(output_directory),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    results = [
+        from_json(json.loads(line))
+        for line in (output_directory / GridFile.FITS).read_text().splitlines()
+    ]
+    assert all(isinstance(result, FitResult) for result in results)
