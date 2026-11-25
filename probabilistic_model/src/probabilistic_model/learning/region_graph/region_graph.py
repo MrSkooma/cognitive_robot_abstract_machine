@@ -145,9 +145,10 @@ class RegionGraph(nx.DiGraph):
             if isinstance(node, Partition):
                 yield node
 
-    def recursive_split(self, node: Region):
+    def recursive_split(self, node: Region) -> None:
         """
-        Recursively split a region into partitions.
+        Recursively split a region into partitions, down to regions of single variables,
+        which stay leaves.
 
         :param node: The node to start inducing from.
         """
@@ -169,6 +170,8 @@ class RegionGraph(nx.DiGraph):
             new_regions = region.random_partition(self.partitions)
             for new_region in new_regions:
                 self.add_edge(partition, new_region)
+                if len(new_region.variables) == 1:
+                    continue
                 new_partition = Partition()
                 self.add_edge(new_region, new_partition)
                 remaining_regions.append((new_region, depth - 1, new_partition))
