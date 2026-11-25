@@ -60,6 +60,20 @@ class AttemptExport:
     The commit of the code that exports them.
     """
 
+    @staticmethod
+    def checked_out_commit() -> str:
+        """
+        :return: The commit of this checkout, marked ``-dirty`` when it has uncommitted
+            changes.
+        """
+        return subprocess.run(
+            ["git", "describe", "--always", "--dirty", "--abbrev=40"],
+            cwd=Path(__file__).parent,
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
     @cached_property
     def grasp_ranges(self) -> ExportedGraspRanges:
         """
@@ -178,17 +192,10 @@ def main() -> None:
         "--output", type=Path, required=True, help="the file the attempts go to"
     )
     arguments = parser.parse_args()
-    commit = subprocess.run(
-        ["git", "describe", "--always", "--dirty", "--abbrev=40"],
-        cwd=Path(__file__).parent,
-        capture_output=True,
-        text=True,
-        check=True,
-    ).stdout.strip()
     export = AttemptExport(
         scene=scene_choice.scene(arguments),
         database=GraspDatabase.from_environment(),
-        commit=commit,
+        commit=AttemptExport.checked_out_commit(),
     )
     attempts = export.exported_attempts()
     ExportFile(path=arguments.output).write(attempts=attempts)

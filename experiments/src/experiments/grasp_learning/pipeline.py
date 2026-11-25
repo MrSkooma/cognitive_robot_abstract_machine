@@ -29,6 +29,7 @@ from experiments.physical_pick_up.pick_up_experiment import (
     PickUpGraspPerformer,
 )
 from experiments.physical_pick_up.scene import PickUpSceneChoice
+from krrood.ormatic.utils import classproperty
 from krrood.parametrization.model_registries import (
     ModelRegistry,
     UniformPriorRegistry,
@@ -92,6 +93,14 @@ class GraspLearningPipeline:
 
     def __post_init__(self):
         self._generator = np.random.default_rng(self.seed)
+
+    @classproperty
+    def attempt_time_limit(cls) -> timedelta:
+        """
+        The simulated time an attempt of the command line may take before its motion
+        counts as not completed.
+        """
+        return timedelta(seconds=20)
 
     @property
     def task(self) -> GraspLearningTask:
@@ -201,7 +210,8 @@ def main() -> None:
     arguments = parser.parse_args()
     pipeline = GraspLearningPipeline(
         experiment=PickUpExperiment(
-            scene=scene_choice.scene(arguments), time_limit=timedelta(seconds=20)
+            scene=scene_choice.scene(arguments),
+            time_limit=GraspLearningPipeline.attempt_time_limit,
         ),
         database=GraspDatabase.from_environment(),
         number_of_attempts=arguments.attempts,
