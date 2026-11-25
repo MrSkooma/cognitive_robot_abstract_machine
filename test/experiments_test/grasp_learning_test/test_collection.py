@@ -15,11 +15,11 @@ from .test_grasp_learning import (
     task_of,
 )
 
-from experiments.grasp_learning.collection import (
+from experiments.grasp_learning.collection import CollectionRun, NumberedRun
+from experiments.grasp_learning.collection_files import (
+    CollectionDirectory,
     CollectionFileSuffix,
     CollectionManifest,
-    CollectionRun,
-    NumberedRun,
 )
 from experiments.grasp_learning.database import GraspDatabase
 from experiments.grasp_learning.exceptions import (
@@ -148,6 +148,31 @@ def test_an_empty_stored_parts_directory_lists_no_files(run, tmp_path):
     run.stored_parts_directory.mkdir()
 
     assert run.stored_part_files() == []
+
+
+def test_the_runs_of_a_task_are_found_in_run_number_order(milk_scene, tmp_path):
+    for run_number in [2, 1]:
+        run = CollectionRun(
+            scene=milk_scene,
+            numbered_run=NumberedRun(task_number=3, run_number=run_number),
+            output_directory=tmp_path,
+            commit="test-commit",
+        )
+        run_database = GraspDatabase.connect(
+            f"sqlite:///{run.path(CollectionFileSuffix.DATABASE)}"
+        )
+        run_database.add_attempts(synthetic_attempts(milk_scene, 2))
+        run.write_results(
+            database=run_database,
+            number_of_grasps_missing_the_surface=0,
+            stored_part_files=[],
+            started=datetime.now(timezone.utc),
+        )
+
+    runs = CollectionDirectory(path=tmp_path).runs_of_task(3)
+
+    assert [run.manifest.run_number for run in runs] == [1, 2]
+    assert [run.attempts_path.exists() for run in runs] == [True, True]
 
 
 # %% repeating a run
