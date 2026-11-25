@@ -33,6 +33,27 @@ class ZeroGraspDensityError(DataclassException):
         )
 
 
+# %% methods
+
+
+@dataclass(kw_only=True)
+class MissingEarlierTaskError(DataclassException):
+    """
+    Raised when a method that learns from a task learned before is given none.
+    """
+
+    method_name: str
+    """
+    The name of the method's class.
+    """
+
+    def error_message(self) -> str:
+        return f"{self.method_name} needs a task learned before the new one."
+
+    def suggest_correction(self) -> str:
+        return "Learn the earlier task first and pass it to the method."
+
+
 # %% grids
 
 

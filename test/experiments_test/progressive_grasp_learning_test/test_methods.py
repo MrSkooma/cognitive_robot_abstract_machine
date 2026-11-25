@@ -12,6 +12,7 @@ from experiments.progressive_grasp_learning.circuit_variables import (
     GraspOutcomeVariables,
     LiftOutcome,
 )
+from experiments.progressive_grasp_learning.exceptions import MissingEarlierTaskError
 from experiments.progressive_grasp_learning.methods import (
     EarlierColumnUnchanged,
     EarlierTask,
@@ -216,3 +217,30 @@ def test_the_outcome_pseudo_count_keeps_failure_possible_after_only_lifts(
         and isinstance(unit.distribution, SymbolicDistribution)
     ]
     assert min(failure_probabilities) > 0
+
+
+@pytest.mark.parametrize("method_type", [ProgressiveColumn, EarlierColumnUnchanged])
+def test_a_method_reading_the_earlier_task_refuses_to_run_without_one(
+    method_type, settings, variables, new_attempts
+):
+    method = (
+        ProgressiveColumn(settings=settings, variables=variables)
+        if method_type is ProgressiveColumn
+        else EarlierColumnUnchanged(variables=variables)
+    )
+
+    with pytest.raises(MissingEarlierTaskError):
+        method.model(training=new_attempts, earlier=None, seed=SEED)
+
+
+def test_fixed_scratch_learns_without_an_earlier_task(
+    settings, variables, new_attempts, probe_grasps
+):
+    model = FixedScratch(settings=settings, variables=variables).model(
+        training=new_attempts, earlier=None, seed=SEED
+    )
+
+    assert model.outcome_likelihoods(probe_grasps).log_joint.shape == (
+        len(probe_grasps),
+        2,
+    )

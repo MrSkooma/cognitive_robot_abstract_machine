@@ -18,6 +18,7 @@ from experiments.progressive_grasp_learning.circuit_variables import (
     GraspOutcomeVariables,
     LiftOutcome,
 )
+from experiments.progressive_grasp_learning.exceptions import MissingEarlierTaskError
 from experiments.progressive_grasp_learning.scoring import OutcomeLikelihoods
 from experiments.progressive_grasp_learning.task_attempts import ScaledAttempts
 from krrood.ormatic.utils import classproperty
@@ -319,13 +320,16 @@ class TransferMethod(ABC):
 
     @abstractmethod
     def model(
-        self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
+        self, *, training: ScaledAttempts, earlier: EarlierTask | None, seed: int
     ) -> OutcomeModel:
         """
         :param training: The attempts of the new task to learn from.
-        :param earlier: The task learned before, from the same seed.
+        :param earlier: The task learned before, from the same seed; none for a method
+            that does not read it.
         :param seed: Seeds the template of a column built here.
         :return: The model of the new task.
+        :raises MissingEarlierTaskError: If the method reads the earlier task and none
+            is given.
         """
 
 
@@ -351,8 +355,10 @@ class ProgressiveColumn(TransferMethod):
         return True
 
     def model(
-        self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
+        self, *, training: ScaledAttempts, earlier: EarlierTask | None, seed: int
     ) -> OutcomeModel:
+        if earlier is None:
+            raise MissingEarlierTaskError(method_name=type(self).__name__)
         progressive_circuit = copy.deepcopy(earlier.progressive_circuit)
         column = progressive_circuit.add_column(task_name="new task")
         self.settings.learn(
@@ -389,7 +395,7 @@ class FixedScratch(TransferMethod):
         return False
 
     def model(
-        self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
+        self, *, training: ScaledAttempts, earlier: EarlierTask | None, seed: int
     ) -> OutcomeModel:
         return self.learned_column(training=training, seed=seed)
 
@@ -450,7 +456,7 @@ class TunedScratch(TransferMethod):
         return False
 
     def model(
-        self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
+        self, *, training: ScaledAttempts, earlier: EarlierTask | None, seed: int
     ) -> OutcomeModel:
         losses = [
             self.cross_validated_loss(settings=settings, training=training, seed=seed)
@@ -502,8 +508,10 @@ class EarlierColumnUnchanged(TransferMethod):
         return True
 
     def model(
-        self, *, training: ScaledAttempts, earlier: EarlierTask, seed: int
+        self, *, training: ScaledAttempts, earlier: EarlierTask | None, seed: int
     ) -> OutcomeModel:
+        if earlier is None:
+            raise MissingEarlierTaskError(method_name=type(self).__name__)
         return ColumnModel(
             progressive_circuit=earlier.progressive_circuit,
             column=earlier.column,

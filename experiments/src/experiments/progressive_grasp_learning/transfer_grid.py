@@ -449,26 +449,29 @@ class GridUnit:
             number_of_attempts=len(pool.lifted),
         )
         seed = self.definition.template_seed(self.repetition)
-        variables = GraspOutcomeVariables()
-        learned_earlier_tasks = [
-            (
-                paired.pair,
-                EarlierTask.learned(
-                    attempts=paired.attempts.training_pool(),
-                    settings=self.definition.settings,
-                    variables=variables,
-                    seed=seed,
-                ),
-            )
-            for paired in self.earlier_tasks
-        ]
+        methods = {
+            compared_method: compared_method.transfer_method(self.definition)
+            for compared_method in self.definition.methods
+        }
+        learned_earlier_tasks = []
+        if any(method.reads_earlier_task for method in methods.values()):
+            variables = GraspOutcomeVariables()
+            learned_earlier_tasks = [
+                (
+                    paired.pair,
+                    EarlierTask.learned(
+                        attempts=paired.attempts.training_pool(),
+                        settings=self.definition.settings,
+                        variables=variables,
+                        seed=seed,
+                    ),
+                )
+                for paired in self.earlier_tasks
+            ]
         results = []
-        for compared_method in self.definition.methods:
-            method = compared_method.transfer_method(self.definition)
+        for compared_method, method in methods.items():
             pairings = (
-                learned_earlier_tasks
-                if method.reads_earlier_task
-                else [(None, learned_earlier_tasks[0][1])]
+                learned_earlier_tasks if method.reads_earlier_task else [(None, None)]
             )
             for pair, earlier in pairings:
                 for (
@@ -548,6 +551,11 @@ class TransferGrid:
     Where the tasks' collection runs wrote their files.
     """
 
+    output_directory: Path
+    """
+    Where the grid's files go.
+    """
+
     def scaled_tasks(self) -> dict[int, ScaledAttempts]:
         """
         :return: The attempts of every task of the grid by task number, scaled with the
@@ -600,21 +608,19 @@ class TransferGrid:
             )
         return units
 
-    def run(self, *, output_directory: Path, number_of_workers: int) -> int:
+    def prepare(self) -> List[GridUnit]:
         """
-        Run every unit and write the definition, the probe baselines and every fit's
-        result into the output directory.
+        Write the definition and the probe baselines into :attr:`output_directory`.
 
-        :param output_directory: Where the files go; it must not hold a grid yet.
-        :param number_of_workers: How many processes run units at once.
-        :return: The number of fits written.
+        :return: The units of the grid.
+        :raises FileExistsError: If the output directory exists already.
         """
-        output_directory.mkdir(parents=True, exist_ok=False)
-        (output_directory / GridFile.DEFINITION).write_text(
+        self.output_directory.mkdir(parents=True, exist_ok=False)
+        (self.output_directory / GridFile.DEFINITION).write_text(
             json.dumps(to_json(self.definition), indent=2) + "\n"
         )
         scaled_tasks = self.scaled_tasks()
-        with (output_directory / GridFile.PROBES).open("w") as probes:
+        with (self.output_directory / GridFile.PROBES).open("w") as probes:
             for task_number, attempts in scaled_tasks.items():
                 probe = attempts.probe_set()
                 baseline = ProbeBaseline(
@@ -626,18 +632,43 @@ class TransferGrid:
                     ).tolist(),
                 )
                 probes.write(json.dumps(to_json(baseline)) + "\n")
+        return self.units(scaled_tasks)
+
+
+# %% running grids
+
+
+@dataclass(kw_only=True)
+class GridRunner:
+    """
+    Runs the units of several grids in one pool of processes and writes each grid's
+    fits into its own output directory.
+    """
+
+    number_of_workers: int = 1
+    """
+    How many processes run units at once.
+    """
+
+    def run(self, grids: List[TransferGrid]) -> int:
+        """
+        :param grids: The grids, each with an output directory that does not exist yet.
+        :return: The number of fits written.
+        """
         number_of_fits = 0
-        with (
-            (output_directory / GridFile.FITS).open("w") as fits,
-            ProcessPoolExecutor(
-                max_workers=number_of_workers,
-                mp_context=multiprocessing.get_context("spawn"),
-            ) as executor,
-        ):
-            futures = [executor.submit(unit.run) for unit in self.units(scaled_tasks)]
-            for future in as_completed(futures):
-                for result in future.result():
-                    fits.write(json.dumps(to_json(result)) + "\n")
-                    number_of_fits += 1
-                fits.flush()
+        with ProcessPoolExecutor(
+            max_workers=self.number_of_workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
+            fits_paths = {}
+            for grid in grids:
+                for unit in grid.prepare():
+                    fits_paths[executor.submit(unit.run)] = (
+                        grid.output_directory / GridFile.FITS
+                    )
+            for future in as_completed(fits_paths):
+                with fits_paths[future].open("a") as fits:
+                    for result in future.result():
+                        fits.write(json.dumps(to_json(result)) + "\n")
+                        number_of_fits += 1
         return number_of_fits

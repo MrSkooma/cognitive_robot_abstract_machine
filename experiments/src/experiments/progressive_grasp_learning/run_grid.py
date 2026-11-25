@@ -1,5 +1,5 @@
 """
-Running the grid a definition file describes, from the command line.
+Running the grids definition files describe, from the command line.
 
 Run it with ``python -m experiments.progressive_grasp_learning.run_grid``; see
 ``--help``.
@@ -12,7 +12,10 @@ import json
 from pathlib import Path
 
 from experiments.grasp_learning.collection_files import CollectionDirectory
-from experiments.progressive_grasp_learning.transfer_grid import TransferGrid
+from experiments.progressive_grasp_learning.transfer_grid import (
+    GridRunner,
+    TransferGrid,
+)
 from krrood.adapters.json_serializer import from_json
 
 # %% the command line
@@ -20,14 +23,15 @@ from krrood.adapters.json_serializer import from_json
 
 def main() -> None:
     """
-    Run the grid a definition file describes and report how many fits it wrote.
+    Run the grids the definition files describe and report how many fits they wrote.
     """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--definition",
+        "--definitions",
         type=Path,
+        nargs="+",
         required=True,
-        help="a JSON file holding the grid's definition",
+        help="JSON files each holding a grid's definition",
     )
     parser.add_argument(
         "--collection-directory",
@@ -39,18 +43,20 @@ def main() -> None:
         "--output-directory",
         type=Path,
         required=True,
-        help="a new directory the grid's files go to",
+        help="the directory each grid's files go to, in a new directory named after "
+        "its definition file",
     )
     parser.add_argument("--workers", type=int, default=1)
     arguments = parser.parse_args()
-    grid = TransferGrid(
-        definition=from_json(json.loads(arguments.definition.read_text())),
-        directory=CollectionDirectory(path=arguments.collection_directory),
-    )
-    number_of_fits = grid.run(
-        output_directory=arguments.output_directory,
-        number_of_workers=arguments.workers,
-    )
+    grids = [
+        TransferGrid(
+            definition=from_json(json.loads(definition_path.read_text())),
+            directory=CollectionDirectory(path=arguments.collection_directory),
+            output_directory=arguments.output_directory / definition_path.stem,
+        )
+        for definition_path in arguments.definitions
+    ]
+    number_of_fits = GridRunner(number_of_workers=arguments.workers).run(grids)
     print(f"{number_of_fits} fits written to {arguments.output_directory}")
 
 

@@ -35,6 +35,7 @@ from experiments.progressive_grasp_learning.transfer_grid import (
     FitResult,
     GridDefinition,
     GridFile,
+    GridRunner,
     TaskChange,
     TaskIdentity,
     TaskPair,
@@ -164,9 +165,11 @@ def test_ordered_pairs_change_exactly_one_of_robot_and_object():
 def test_a_grid_writes_one_fit_per_method_pairing_size_and_repetition(
     definition, directory, tmp_path
 ):
-    grid = TransferGrid(definition=definition, directory=directory)
+    grid = TransferGrid(
+        definition=definition, directory=directory, output_directory=tmp_path / "grid"
+    )
 
-    number_of_fits = grid.run(output_directory=tmp_path / "grid", number_of_workers=2)
+    number_of_fits = GridRunner(number_of_workers=2).run([grid])
 
     pairs = TaskPair.ordered_pairs([PR2_BOWL, PR2_MUG, TRACY_BOWL])
     new_tasks = {pair.new for pair in pairs}
@@ -188,8 +191,14 @@ def test_a_grid_writes_one_fit_per_method_pairing_size_and_repetition(
 
 def test_the_fits_file_reads_back_the_written_results(definition, directory, tmp_path):
     output_directory = tmp_path / "grid"
-    number_of_fits = TransferGrid(definition=definition, directory=directory).run(
-        output_directory=output_directory, number_of_workers=1
+    number_of_fits = GridRunner().run(
+        [
+            TransferGrid(
+                definition=definition,
+                directory=directory,
+                output_directory=output_directory,
+            )
+        ]
     )
 
     results = [
@@ -206,8 +215,14 @@ def test_methods_that_ignore_the_earlier_task_name_none(
     definition, directory, tmp_path
 ):
     output_directory = tmp_path / "grid"
-    TransferGrid(definition=definition, directory=directory).run(
-        output_directory=output_directory, number_of_workers=1
+    GridRunner().run(
+        [
+            TransferGrid(
+                definition=definition,
+                directory=directory,
+                output_directory=output_directory,
+            )
+        ]
     )
 
     results = [
@@ -224,10 +239,34 @@ def test_methods_that_ignore_the_earlier_task_name_none(
 
 def test_asking_for_more_attempts_than_the_pool_holds_is_refused(definition, directory):
     definition.numbers_of_training_attempts = [1000]
-    grid = TransferGrid(definition=definition, directory=directory)
+    grid = TransferGrid(
+        definition=definition, directory=directory, output_directory=directory.path
+    )
 
     with pytest.raises(TooFewTrainingAttemptsError):
         grid.units(grid.scaled_tasks())[0].run()
+
+
+def test_one_runner_writes_each_grid_into_its_own_directory(
+    definition, directory, tmp_path
+):
+    definition.methods = [ComparedMethod.FIXED_SCRATCH]
+    grids = [
+        TransferGrid(
+            definition=definition,
+            directory=directory,
+            output_directory=tmp_path / name,
+        )
+        for name in ["first", "second"]
+    ]
+
+    GridRunner(number_of_workers=2).run(grids)
+
+    first, second = (
+        (grid.output_directory / GridFile.FITS).read_text().splitlines()
+        for grid in grids
+    )
+    assert len(first) == len(second) > 0
 
 
 # %% the command line
@@ -245,7 +284,7 @@ def test_the_fits_the_command_writes_read_back_as_results(
             sys.executable,
             "-m",
             run_grid.__name__,
-            "--definition",
+            "--definitions",
             str(definition_path),
             "--collection-directory",
             str(directory.path),
@@ -258,6 +297,8 @@ def test_the_fits_the_command_writes_read_back_as_results(
 
     results = [
         from_json(json.loads(line))
-        for line in (output_directory / GridFile.FITS).read_text().splitlines()
+        for line in (output_directory / definition_path.stem / GridFile.FITS)
+        .read_text()
+        .splitlines()
     ]
     assert all(isinstance(result, FitResult) for result in results)
