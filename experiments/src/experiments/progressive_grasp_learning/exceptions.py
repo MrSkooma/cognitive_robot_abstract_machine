@@ -6,6 +6,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from typing_extensions import List
+
 from krrood.exceptions import DataclassException
 
 # %% scoring
@@ -87,3 +89,36 @@ class TooFewTrainingAttemptsError(DataclassException):
 
     def suggest_correction(self) -> str:
         return "Collect more runs of the task or ask for fewer training attempts."
+
+
+# %% statistics of grids
+
+
+@dataclass(kw_only=True)
+class NoMatchingFitsError(DataclassException):
+    """
+    Raised when a grid holds no fit of a method for the numbers of training attempts and
+    the kind of task change asked for.
+    """
+
+    method_name: str
+    """
+    The name of the method asked for.
+    """
+
+    numbers_of_training_attempts: List[int]
+    """
+    The numbers of training attempts asked for.
+    """
+
+    def error_message(self) -> str:
+        return (
+            f"The grid holds no fit of {self.method_name} after "
+            f"{self.numbers_of_training_attempts} training attempts."
+        )
+
+    def suggest_correction(self) -> str:
+        return (
+            "Ask for numbers of training attempts and a kind of task change the grid's "
+            "definition holds."
+        )

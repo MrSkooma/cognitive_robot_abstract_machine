@@ -7,13 +7,14 @@ correction for testing several gains at once.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
 from typing_extensions import List
 
+from experiments.progressive_grasp_learning.exceptions import NoMatchingFitsError
 from experiments.progressive_grasp_learning.transfer_grid import (
     ComparedMethod,
     FitResult,
@@ -303,6 +304,7 @@ class GridResults:
         :param number_of_training_attempts: How many attempts the fits learned from.
         :param change: Keeps only the pairs with this change; none keeps every fit.
         :return: The method's skill, as its gain over the constant prediction.
+        :raises NoMatchingFitsError: If the grid holds no such fit.
         """
         fits = [
             fit
@@ -311,6 +313,11 @@ class GridResults:
             and fit.number_of_training_attempts == number_of_training_attempts
             and (change is None or fit.change == change)
         ]
+        if not fits:
+            raise NoMatchingFitsError(
+                method_name=method.value,
+                numbers_of_training_attempts=[number_of_training_attempts],
+            )
         return SkillGain(
             paired_task_fits=[
                 PairedTaskFits(
@@ -348,6 +355,7 @@ class GridResults:
             over.
         :return: The method's skill minus the reference method's, paired by task pair,
             number of training attempts and repetition.
+        :raises NoMatchingFitsError: If the grid holds no such fit of the method.
         """
         reference_reads_earlier_task = reference_method.transfer_method(
             self.definition
@@ -364,6 +372,11 @@ class GridResults:
             and fit.change == change
             and fit.number_of_training_attempts in numbers_of_training_attempts
         ]
+        if not fits:
+            raise NoMatchingFitsError(
+                method_name=method.value,
+                numbers_of_training_attempts=numbers_of_training_attempts,
+            )
         paired_task_fits = []
         for task_number, task_fits in self.fits_by_new_task(fits).items():
             paired_references = [
@@ -456,3 +469,180 @@ class HolmCorrection:
                 break
             rejected[index] = True
         return rejected
+
+
+# %% the primary endpoints
+
+
+@dataclass(kw_only=True)
+class EndpointResult:
+    """
+    The gain of one endpoint and whether a gain of zero is rejected.
+    """
+
+    change: TaskChange
+    """
+    The kind of task change the endpoint averages over.
+    """
+
+    gain: BootstrapEstimate
+    """
+    The gain, with its interval and p-value.
+    """
+
+    zero_gain_rejected: bool
+    """
+    Whether a gain of zero is rejected, after the correction for testing every endpoint.
+    """
+
+
+@dataclass(kw_only=True)
+class TransferEndpoints:
+    """
+    The gains of a method over a reference method, one per kind of task change, each
+    averaged over numbers of training attempts and the ordered pairs of its change, and
+    decided together with Holm's correction.
+    """
+
+    method: ComparedMethod
+    """
+    The method whose gain is measured.
+    """
+
+    reference_method: ComparedMethod
+    """
+    The method it is compared with.
+    """
+
+    numbers_of_training_attempts: List[int]
+    """
+    The numbers of training attempts each endpoint averages over.
+    """
+
+    holm_correction: HolmCorrection = field(default_factory=HolmCorrection)
+    """
+    Decides the endpoints together.
+    """
+
+    number_of_resamples: int = 2000
+    """
+    How many bootstrap resamples each endpoint draws.
+    """
+
+    def evaluated(
+        self, *, grid_results: GridResults, generator: np.random.Generator
+    ) -> List[EndpointResult]:
+        """
+        :param grid_results: The results of the grid.
+        :param generator: Draws the bootstrap resamples.
+        :return: One result per kind of task change, in the order of :class:`TaskChange`.
+        """
+        gains = [
+            grid_results.gain(
+                method=self.method,
+                reference_method=self.reference_method,
+                change=change,
+                numbers_of_training_attempts=self.numbers_of_training_attempts,
+            ).bootstrapped(
+                generator=generator, number_of_resamples=self.number_of_resamples
+            )
+            for change in TaskChange
+        ]
+        rejected = self.holm_correction.rejected([gain.p_value for gain in gains])
+        return [
+            EndpointResult(change=change, gain=gain, zero_gain_rejected=zero_rejected)
+            for change, gain, zero_rejected in zip(TaskChange, gains, rejected)
+        ]
+
+
+# %% skill curves
+
+
+@dataclass(kw_only=True)
+class SkillCurvePoint:
+    """
+    The skill of a method after a number of training attempts.
+    """
+
+    method: ComparedMethod
+    """
+    The method.
+    """
+
+    change: TaskChange | None
+    """
+    The kind of task change averaged over; none for a method that does not read the
+    earlier task, which is averaged over every new task.
+    """
+
+    number_of_training_attempts: int
+    """
+    How many attempts the fits learned from.
+    """
+
+    skill: BootstrapEstimate
+    """
+    The skill, with its interval.
+    """
+
+
+@dataclass(kw_only=True)
+class GridAnalysis:
+    """
+    The primary endpoints and the skill curves of every method of a grid.
+    """
+
+    endpoints: List[EndpointResult]
+    """
+    One result per kind of task change.
+    """
+
+    skill_curves: List[SkillCurvePoint]
+    """
+    For each method, kind of task change it reads and number of training attempts, one
+    point.
+    """
+
+    @classmethod
+    def of_grid(
+        cls,
+        *,
+        grid_results: GridResults,
+        endpoints: TransferEndpoints,
+        generator: np.random.Generator,
+    ) -> GridAnalysis:
+        """
+        :param grid_results: The results of the grid.
+        :param endpoints: The endpoints to evaluate.
+        :param generator: Draws every bootstrap resample.
+        :return: The analysis of the grid.
+        """
+        definition = grid_results.definition
+        skill_curves = [
+            SkillCurvePoint(
+                method=method,
+                change=change,
+                number_of_training_attempts=number_of_training_attempts,
+                skill=grid_results.skill(
+                    method=method,
+                    number_of_training_attempts=number_of_training_attempts,
+                    change=change,
+                ).bootstrapped(
+                    generator=generator,
+                    number_of_resamples=endpoints.number_of_resamples,
+                ),
+            )
+            for method in definition.methods
+            for change in (
+                list(TaskChange)
+                if method.transfer_method(definition).reads_earlier_task
+                else [None]
+            )
+            for number_of_training_attempts in definition.numbers_of_training_attempts
+        ]
+        return cls(
+            endpoints=endpoints.evaluated(
+                grid_results=grid_results, generator=generator
+            ),
+            skill_curves=skill_curves,
+        )
