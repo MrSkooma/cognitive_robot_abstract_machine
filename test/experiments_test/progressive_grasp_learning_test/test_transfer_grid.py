@@ -4,6 +4,7 @@ Pairing tasks and running a grid of fits over their attempts.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import math
 import subprocess
@@ -24,6 +25,7 @@ from experiments.progressive_grasp_learning.exceptions import (
     TooFewTrainingAttemptsError,
 )
 from experiments.progressive_grasp_learning.methods import (
+    ExpectationMaximizationSettings,
     LearningSettings,
     RatSpnTemplate,
 )
@@ -116,7 +118,8 @@ def definition() -> GridDefinition:
     A small grid over three tasks, with every method.
     """
     small = LearningSettings(
-        template=RatSpnTemplate(depth=1, units_per_region=2), iterations=3
+        template=RatSpnTemplate(depth=1, units_per_region=2),
+        expectation_maximization=ExpectationMaximizationSettings(iterations=3),
     )
     return GridDefinition(
         task_numbers=[
@@ -128,6 +131,9 @@ def definition() -> GridDefinition:
         numbers_of_training_attempts=[3, 6],
         number_of_repetitions=2,
         settings=small,
+        earlier_task_expectation_maximization=ExpectationMaximizationSettings(
+            iterations=5
+        ),
         scratch_candidates=[small],
         methods=list(ComparedMethod),
     )
@@ -267,6 +273,65 @@ def test_one_runner_writes_each_grid_into_its_own_directory(
         for grid in grids
     )
     assert len(first) == len(second) > 0
+
+
+def earlier_column_skills(
+    definition: GridDefinition, directory: CollectionDirectory, output_directory
+) -> list[float]:
+    """
+    Run a grid of the earlier column unchanged alone.
+
+    :return: The skill of every fit, ordered by new task, earlier task, number of
+        training attempts and repetition.
+    """
+    definition.methods = [ComparedMethod.EARLIER_COLUMN_UNCHANGED]
+    GridRunner().run(
+        [
+            TransferGrid(
+                definition=definition,
+                directory=directory,
+                output_directory=output_directory,
+            )
+        ]
+    )
+    results = [
+        from_json(json.loads(line))
+        for line in (output_directory / GridFile.FITS).read_text().splitlines()
+    ]
+    results.sort(
+        key=lambda result: (
+            result.new_task_number,
+            result.earlier_task_number,
+            result.number_of_training_attempts,
+            result.repetition,
+        )
+    )
+    return [result.skill for result in results]
+
+
+def test_the_new_columns_settings_leave_the_earlier_column_unchanged(
+    definition, directory, tmp_path
+):
+    before = earlier_column_skills(definition, directory, tmp_path / "before")
+
+    definition.settings = dataclasses.replace(
+        definition.settings,
+        expectation_maximization=ExpectationMaximizationSettings(iterations=1),
+    )
+
+    assert earlier_column_skills(definition, directory, tmp_path / "after") == before
+
+
+def test_the_earlier_tasks_settings_change_the_earlier_column(
+    definition, directory, tmp_path
+):
+    before = earlier_column_skills(definition, directory, tmp_path / "before")
+
+    definition.earlier_task_expectation_maximization = ExpectationMaximizationSettings(
+        iterations=1
+    )
+
+    assert earlier_column_skills(definition, directory, tmp_path / "after") != before
 
 
 # %% the command line

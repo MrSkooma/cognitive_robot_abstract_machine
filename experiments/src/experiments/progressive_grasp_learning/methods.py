@@ -120,24 +120,9 @@ class RatSpnTemplate:
 
 
 @dataclass(kw_only=True)
-class LearningSettings:
+class ExpectationMaximizationSettings:
     """
-    How a column of a progressive circuit is built and learned.
-    """
-
-    template: RatSpnTemplate
-    """
-    The circuit every column is a copy of.
-    """
-
-    earlier_column_target: EarlierColumnTarget = EarlierColumnTarget.ALIGNED_SUM_UNIT
-    """
-    The units of earlier columns a new column's sum units get edges to.
-    """
-
-    earlier_column_share: float = 0.5
-    """
-    The share of each new sum unit's start weight on the edges to earlier columns.
+    How expectation maximization learns a column of a progressive circuit from attempts.
     """
 
     iterations: int = 20
@@ -154,20 +139,6 @@ class LearningSettings:
     """
     Added to the weighted count of each outcome in every learned outcome leaf.
     """
-
-    def progressive_circuit(
-        self, *, variables: GraspOutcomeVariables, seed: int
-    ) -> ProgressiveProbabilisticCircuit:
-        """
-        :param variables: The variables of the circuit.
-        :param seed: Seeds the template.
-        :return: A progressive circuit without columns.
-        """
-        return ProgressiveProbabilisticCircuit(
-            template=self.template.circuit(variables=variables, seed=seed),
-            earlier_column_share=self.earlier_column_share,
-            earlier_column_target=self.earlier_column_target,
-        )
 
     def learn(
         self,
@@ -197,6 +168,50 @@ class LearningSettings:
             ),
             column,
             iterations=self.iterations,
+        )
+
+
+@dataclass(kw_only=True)
+class LearningSettings:
+    """
+    How a column of a progressive circuit is built, and learned from a new task's
+    attempts.
+    """
+
+    template: RatSpnTemplate
+    """
+    The circuit every column is a copy of.
+    """
+
+    earlier_column_target: EarlierColumnTarget = EarlierColumnTarget.ALIGNED_SUM_UNIT
+    """
+    The units of earlier columns a new column's sum units get edges to.
+    """
+
+    earlier_column_share: float = 0.5
+    """
+    The share of each new sum unit's start weight on the edges to earlier columns.
+    """
+
+    expectation_maximization: ExpectationMaximizationSettings = field(
+        default_factory=ExpectationMaximizationSettings
+    )
+    """
+    How a column is learned from the new task's attempts.
+    """
+
+    def progressive_circuit(
+        self, *, variables: GraspOutcomeVariables, seed: int
+    ) -> ProgressiveProbabilisticCircuit:
+        """
+        :param variables: The variables of the circuit.
+        :param seed: Seeds the template.
+        :return: A progressive circuit without columns.
+        """
+        return ProgressiveProbabilisticCircuit(
+            template=self.template.circuit(variables=variables, seed=seed),
+            earlier_column_share=self.earlier_column_share,
+            earlier_column_target=self.earlier_column_target,
         )
 
 
@@ -254,6 +269,33 @@ class ColumnModel(OutcomeModel):
         )
 
 
+@dataclass(kw_only=True)
+class ConstantLiftProbability(OutcomeModel):
+    """
+    The same probability of lifting for every grasp, with every grasp equally likely on
+    the unit box of scaled grasps.
+    """
+
+    lift_probability: float
+    """
+    The probability of lifting the object, whatever the grasp.
+    """
+
+    def outcome_likelihoods(self, grasps: NDArray[np.float64]) -> OutcomeLikelihoods:
+        outcome_probabilities = {
+            LiftOutcome.LIFTED: self.lift_probability,
+            LiftOutcome.NOT_LIFTED: 1 - self.lift_probability,
+        }
+        return OutcomeLikelihoods(
+            log_joint=np.column_stack(
+                [
+                    np.full(len(grasps), np.log(outcome_probabilities[outcome]))
+                    for outcome in LiftOutcome
+                ]
+            )
+        )
+
+
 # %% a task learned before
 
 
@@ -279,12 +321,14 @@ class EarlierTask:
         *,
         attempts: ScaledAttempts,
         settings: LearningSettings,
+        expectation_maximization: ExpectationMaximizationSettings,
         variables: GraspOutcomeVariables,
         seed: int,
     ) -> EarlierTask:
         """
         :param attempts: The attempts of the task.
-        :param settings: How the column is built and learned.
+        :param settings: How the column is built.
+        :param expectation_maximization: How the column is learned from the attempts.
         :param variables: The variables of the circuit.
         :param seed: Seeds the template.
         :return: The task, learned from its attempts.
@@ -293,7 +337,7 @@ class EarlierTask:
             variables=variables, seed=seed
         )
         column = progressive_circuit.add_column(task_name="earlier task")
-        settings.learn(
+        expectation_maximization.learn(
             progressive_circuit=progressive_circuit,
             column=column,
             attempts=attempts,
@@ -342,7 +386,8 @@ class ProgressiveColumn(TransferMethod):
 
     settings: LearningSettings
     """
-    How the new column is learned; the earlier task was built with the same settings.
+    How the new column is learned; the earlier task was built with the same template and
+    edges.
     """
 
     variables: GraspOutcomeVariables = field(default_factory=GraspOutcomeVariables)
@@ -361,7 +406,7 @@ class ProgressiveColumn(TransferMethod):
             raise MissingEarlierTaskError(method_name=type(self).__name__)
         progressive_circuit = copy.deepcopy(earlier.progressive_circuit)
         column = progressive_circuit.add_column(task_name="new task")
-        self.settings.learn(
+        self.settings.expectation_maximization.learn(
             progressive_circuit=progressive_circuit,
             column=column,
             attempts=training,
@@ -409,7 +454,7 @@ class FixedScratch(TransferMethod):
             variables=self.variables, seed=seed
         )
         column = progressive_circuit.add_column(task_name="new task")
-        self.settings.learn(
+        self.settings.expectation_maximization.learn(
             progressive_circuit=progressive_circuit,
             column=column,
             attempts=training,
@@ -516,4 +561,31 @@ class EarlierColumnUnchanged(TransferMethod):
             progressive_circuit=earlier.progressive_circuit,
             column=earlier.column,
             variables=self.variables,
+        )
+
+
+@dataclass(kw_only=True)
+class LiftRateOfTrainingAttempts(TransferMethod):
+    """
+    The lift rate of the new task's attempts, with a pseudo-count per outcome, predicted
+    for every grasp.
+    """
+
+    outcome_pseudo_count: float
+    """
+    Added to the count of each outcome among the attempts.
+    """
+
+    @property
+    def reads_earlier_task(self) -> bool:
+        return False
+
+    def model(
+        self, *, training: ScaledAttempts, earlier: EarlierTask | None, seed: int
+    ) -> OutcomeModel:
+        return ConstantLiftProbability(
+            lift_probability=float(
+                (np.sum(training.lifted) + self.outcome_pseudo_count)
+                / (len(training.lifted) + len(LiftOutcome) * self.outcome_pseudo_count)
+            )
         )

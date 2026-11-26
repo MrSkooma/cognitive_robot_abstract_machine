@@ -26,8 +26,10 @@ from experiments.progressive_grasp_learning.exceptions import (
 from experiments.progressive_grasp_learning.methods import (
     EarlierColumnUnchanged,
     EarlierTask,
+    ExpectationMaximizationSettings,
     FixedScratch,
     LearningSettings,
+    LiftRateOfTrainingAttempts,
     ProgressiveColumn,
     TransferMethod,
     TunedScratch,
@@ -71,6 +73,11 @@ class ComparedMethod(StrEnum):
     The earlier task's column, not learned on the new attempts.
     """
 
+    LIFT_RATE_OF_TRAINING_ATTEMPTS = "lift rate of the training attempts"
+    """
+    The lift rate of the new attempts, the same prediction for every grasp.
+    """
+
     def transfer_method(self, definition: GridDefinition) -> TransferMethod:
         """
         :param definition: The grid the method runs in.
@@ -85,6 +92,10 @@ class ComparedMethod(StrEnum):
                 return FixedScratch(settings=definition.settings)
             case ComparedMethod.EARLIER_COLUMN_UNCHANGED:
                 return EarlierColumnUnchanged()
+            case ComparedMethod.LIFT_RATE_OF_TRAINING_ATTEMPTS:
+                return LiftRateOfTrainingAttempts(
+                    outcome_pseudo_count=definition.settings.expectation_maximization.outcome_pseudo_count
+                )
 
 
 # %% tasks and pairs
@@ -222,7 +233,13 @@ class GridDefinition:
 
     settings: LearningSettings
     """
-    How the earlier task, the progressive column and fixed scratch are learned.
+    How every column is built, and how the progressive column and fixed scratch are
+    learned from the new task's attempts.
+    """
+
+    earlier_task_expectation_maximization: ExpectationMaximizationSettings
+    """
+    How the earlier task's column is learned from its whole training pool.
     """
 
     scratch_candidates: List[LearningSettings]
@@ -462,6 +479,7 @@ class GridUnit:
                     EarlierTask.learned(
                         attempts=paired.attempts.training_pool(),
                         settings=self.definition.settings,
+                        expectation_maximization=self.definition.earlier_task_expectation_maximization,
                         variables=variables,
                         seed=seed,
                     ),

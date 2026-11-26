@@ -4,6 +4,8 @@ The template circuit and the methods that learn a new grasp task.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 import pytest
 
@@ -16,8 +18,10 @@ from experiments.progressive_grasp_learning.exceptions import MissingEarlierTask
 from experiments.progressive_grasp_learning.methods import (
     EarlierColumnUnchanged,
     EarlierTask,
+    ExpectationMaximizationSettings,
     FixedScratch,
     LearningSettings,
+    LiftRateOfTrainingAttempts,
     ProgressiveColumn,
     RatSpnTemplate,
     TunedScratch,
@@ -50,7 +54,8 @@ def settings() -> LearningSettings:
     Settings of a small template, learned briefly.
     """
     return LearningSettings(
-        template=RatSpnTemplate(depth=1, units_per_region=2), iterations=5
+        template=RatSpnTemplate(depth=1, units_per_region=2),
+        expectation_maximization=ExpectationMaximizationSettings(iterations=5),
     )
 
 
@@ -128,7 +133,11 @@ def test_a_column_without_weight_on_the_earlier_task_learns_like_fixed_scratch(
 ):
     settings.earlier_column_share = 0.0
     earlier = EarlierTask.learned(
-        attempts=earlier_attempts, settings=settings, variables=variables, seed=SEED
+        attempts=earlier_attempts,
+        settings=settings,
+        expectation_maximization=settings.expectation_maximization,
+        variables=variables,
+        seed=SEED,
     )
 
     progressive, scratch = (
@@ -149,7 +158,11 @@ def test_learning_a_new_column_leaves_the_earlier_column_unchanged(
     settings, variables, earlier_attempts, new_attempts, probe_grasps
 ):
     earlier = EarlierTask.learned(
-        attempts=earlier_attempts, settings=settings, variables=variables, seed=SEED
+        attempts=earlier_attempts,
+        settings=settings,
+        expectation_maximization=settings.expectation_maximization,
+        variables=variables,
+        seed=SEED,
     )
     unchanged = EarlierColumnUnchanged(variables=variables)
     before = (
@@ -176,12 +189,17 @@ def test_tuned_scratch_learns_the_candidate_with_the_lowest_cross_validated_loss
     candidates = [
         settings,
         LearningSettings(
-            template=RatSpnTemplate(depth=1, units_per_region=5), iterations=5
+            template=RatSpnTemplate(depth=1, units_per_region=5),
+            expectation_maximization=ExpectationMaximizationSettings(iterations=5),
         ),
     ]
     tuned = TunedScratch(candidates=candidates, variables=variables)
     earlier = EarlierTask.learned(
-        attempts=earlier_attempts, settings=settings, variables=variables, seed=SEED
+        attempts=earlier_attempts,
+        settings=settings,
+        expectation_maximization=settings.expectation_maximization,
+        variables=variables,
+        seed=SEED,
     )
     losses = [
         tuned.cross_validated_loss(settings=candidate, training=new_attempts, seed=SEED)
@@ -202,7 +220,7 @@ def test_tuned_scratch_learns_the_candidate_with_the_lowest_cross_validated_loss
 def test_the_outcome_pseudo_count_keeps_failure_possible_after_only_lifts(
     settings, variables, new_attempts
 ):
-    settings.outcome_pseudo_count = 1.0
+    settings.expectation_maximization.outcome_pseudo_count = 1.0
     only_lifts = new_attempts.rows(np.arange(len(new_attempts.lifted)))
     only_lifts.lifted = np.ones(len(only_lifts.lifted), dtype=bool)
 
@@ -217,6 +235,52 @@ def test_the_outcome_pseudo_count_keeps_failure_possible_after_only_lifts(
         and isinstance(unit.distribution, SymbolicDistribution)
     ]
     assert min(failure_probabilities) > 0
+
+
+def test_the_earlier_task_is_learned_with_its_own_expectation_maximization_settings(
+    settings, variables, earlier_attempts, new_attempts, probe_grasps
+):
+    whole_pool = ExpectationMaximizationSettings(
+        iterations=20, minimum_gaussian_variance=0.05**2
+    )
+    earlier = EarlierTask.learned(
+        attempts=earlier_attempts,
+        settings=settings,
+        expectation_maximization=whole_pool,
+        variables=variables,
+        seed=SEED,
+    )
+
+    unchanged = EarlierColumnUnchanged(variables=variables).model(
+        training=new_attempts, earlier=earlier, seed=SEED
+    )
+
+    learned_alone = FixedScratch(
+        settings=dataclasses.replace(settings, expectation_maximization=whole_pool),
+        variables=variables,
+    ).learned_column(training=earlier_attempts, seed=SEED)
+    np.testing.assert_allclose(
+        unchanged.outcome_likelihoods(probe_grasps).log_joint,
+        learned_alone.outcome_likelihoods(probe_grasps).log_joint,
+    )
+
+
+def test_the_lift_rate_of_the_training_attempts_is_predicted_for_every_grasp(
+    new_attempts, probe_grasps
+):
+    outcome_pseudo_count = 1.0
+
+    model = LiftRateOfTrainingAttempts(outcome_pseudo_count=outcome_pseudo_count).model(
+        training=new_attempts, earlier=None, seed=SEED
+    )
+
+    lift_rate = (np.sum(new_attempts.lifted) + outcome_pseudo_count) / (
+        len(new_attempts.lifted) + len(LiftOutcome) * outcome_pseudo_count
+    )
+    np.testing.assert_allclose(
+        model.outcome_likelihoods(probe_grasps).lift_probabilities,
+        np.full(len(probe_grasps), lift_rate),
+    )
 
 
 @pytest.mark.parametrize("method_type", [ProgressiveColumn, EarlierColumnUnchanged])
